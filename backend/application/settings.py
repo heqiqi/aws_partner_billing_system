@@ -424,9 +424,8 @@ EMAIL_USE_SSL = True
 EMAIL_PORT = 465
 # 发送邮件的邮箱
 EMAIL_HOST_USER = 'notify_noreply@yeah.net'
-# 在邮箱中设置的客户端授权密码
-# EMAIL_HOST_PASSWORD = 'QCOSHAEWSKQVPTBX'
-EMAIL_HOST_PASSWORD = 'CTTWNOGEJBCNNNXO'
+#aa 在邮箱中设置的客户端授权密码
+EMAIL_HOST_PASSWORD = 'changeme for your own stmp configure'
 # 收件人看到的发件人
 EMAIL_FROM = 'notify_noreply<notify_noreply@yeah.net>'
 DEFAULT_FROM_EMAIL = 'notify_noreply@yeah.net'

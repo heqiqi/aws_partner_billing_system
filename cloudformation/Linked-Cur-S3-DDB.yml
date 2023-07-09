@@ -7,7 +7,7 @@ Parameters:
   TableName:
     Description: Dyname DB Table Name
     Type: String
-    Default: 'monthly-cur-whole-org2'
+    Default: 'monthly-cur-whole-org'
     AllowedPattern: '[a-zA-Z0-9|_|-]*'
     MinLength: '1'
     MaxLength: '2048'
@@ -59,6 +59,10 @@ Parameters:
     MaxValue: '10000'
     ConstraintDescription: must be between 5 and 10000
 Resources:
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub "org-cur-integration-${AWS::AccountId}"
   myDynamoDBTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -84,3 +88,8 @@ Outputs:
   TableName:
     Value: !Ref 'myDynamoDBTable'
     Description: Table name of the newly created DynamoDB table
+  S3Bucket:
+    Value: !Ref 'S3Bucket'
+    Description: Table name of the newly created Bucket
+  
+  
