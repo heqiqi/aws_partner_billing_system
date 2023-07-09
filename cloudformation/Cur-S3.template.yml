@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Enable cost and usage report, and Create a S3 bucket for it.
+Resources:
+  CURS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub "organization-enable-cur-${AWS::AccountId}"
+      # BucketEncryption:
+      #   ServerSideEncryptionConfiguration: 
+      #     - ServerSideEncryptionByDefault: 
+      #         SSEAlgorithm: AES256
+
+  CURBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CURS3Bucket
+      PolicyDocument:
+        Version: '2008-10-17'
+        Id: Policy1335892530063
+        Statement: 
+          - Sid: Stmt1335892150622
+            Effect: Allow
+            Principal: 
+              Service: billingreports.amazonaws.com
+            Action: 
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+            Resource: !Sub 'arn:aws:s3:::${CURS3Bucket}'
+            Condition: 
+              StringEquals: 
+                aws:SourceArn: !Sub 'arn:aws:cur:us-east-1:${AWS::AccountId}:definition/*'
+                aws:SourceAccount: !Sub '${AWS::AccountId}'
+          - Sid: Stmt1335892526596
+            Effect: Allow
+            Principal: 
+              Service: billingreports.amazonaws.com
+            Action: 
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${CURS3Bucket}/*'
+            Condition: 
+              StringEquals: 
+                aws:SourceArn: !Sub 'arn:aws:cur:us-east-1:${AWS::AccountId}:definition/*'
+                aws:SourceAccount: !Sub '${AWS::AccountId}'  
+          - Sid: Stmt1565731301209
+            Effect: Allow
+            Principal: 
+              AWS: arn:aws:iam::704569129831:role/Lambda-List-S3-Role
+            Action: 
+              - s3:ListBucket
+              - s3:*
+            Resource: 
+              - !Sub 'arn:aws:s3:::${CURS3Bucket}/*'
+              - !Sub 'arn:aws:s3:::${CURS3Bucket}'
+            Condition: 
+              StringLike: 
+                aws:UserAgent: '*AWS_Lambda_*'
+
+  CURReport:
+    Type: 'AWS::CUR::ReportDefinition'
+    Properties:
+      ReportName: 'organization-enable-cur'
+      TimeUnit: 'MONTHLY'
+      Format: 'Parquet'  # The format that AWS saves the report in
+      Compression: 'Parquet'  # The compression format that AWS uses for the report
+      # AdditionalArtifacts: 'ATHENA'
+      S3Bucket: !Ref CURS3Bucket # The S3 bucket where AWS delivers the report
+      S3Prefix: !Sub 'monthly-cur-${AWS::AccountId}' # The prefix that AWS adds to the report name when AWS delivers the report
+      S3Region: 'us-east-1'  # The region of the S3 bucket that AWS delivers the report into
+      RefreshClosedReports: true  # Whether you want AWS to update your reports after they have been finalized
+      ReportVersioning: 'OVERWRITE_REPORT'  # CREATE_NEW_REPORT'|'OVERWRITE_REPORT Whether you want AWS to overwrite the previous version of each report or to deliver the report in addition to the previous versions
+      
