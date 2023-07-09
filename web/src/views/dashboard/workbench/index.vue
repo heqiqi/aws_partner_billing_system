@@ -2,7 +2,6 @@
   <d2-container>
     <el-tabs type="border-card" v-model="currentTab" v-if="showTabList">
       <el-tab-pane v-for="(tab,index) in tabList" :key="index" :label="tab.account_id">
-<!--        {{ tab.account_id }}仪表板：-->
         <iframe
           width="100%"
           height="720"
@@ -13,25 +12,7 @@
     <el-empty style="position: absolute;padding: 0px 0!important;width: 100%;" v-if="!showTabList" description="未查到任何账单组信息,请在“系统管理”-->“账号管理”下设置payer账号。"></el-empty>
 
   </d2-container>
-<!--  <el-tabs id="dashboard" type="card" v-loading="isLoading" v-model="currentTab">-->
-<!--    <el-tab-pane-->
-<!--      v-for="(item, index) in tabList"-->
-<!--      :key="index"-->
-<!--      :label="item.account_id"-->
-<!--      :name="item.name"-->
-<!--    >-->
-<!--      &lt;!&ndash;        <span slot="label"><i class="el-icon-date"></i> {{item.name}}</span>&ndash;&gt;-->
-<!--      <iframe-->
-<!--        width="100%"-->
-<!--        height="720"-->`
-<!--        src="item.dashboard_url">-->
-<!--      </iframe>-->
-<!--    </el-tab-pane>-->
-<!--  </el-tabs>-->
-
 </template>
-<!--src="https://us-east-1.quicksight.aws.amazon.com/sn/embed/share/accounts/704569129831/dashboards/cost_intelligence_dashboard?directory_alias=heqiquicksight"-->
-
 <script>
 import allComps from './components'
 import initData from './init.js'
