@@ -40,8 +40,6 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 - 设置QuickSight看板共享
     * 进入Cost Intelligent Dashboard
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/dashboard-cfn.png)
-    * 点击共享，设置为public
-![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/set-share.png)
     * 点击共享，设置为public，并记录下embed code
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/set-share.png)
     * 设置域名访问权限:
@@ -81,7 +79,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
             "Resource": "*"
         }
     ]
-}``
+}`
         * 托管权限
         ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/permission-lambda.png)
     * 创建Lambda function，源码为: `lambda/cpy_linked_s3_to_payer.py`, 执行role使用`Lambda-List-S3-Role`
@@ -116,13 +114,13 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 ## 首次设置
 ### 设置后台
 首次登录的管理员用户名：superadmin，密码为：admin123456
-1. 登录aws console，在 payer 账号下，创建新的IAM User， 并且生成AK、SK，所需权限如下：
+- 登录aws console，在 payer 账号下，创建新的IAM User， 并且生成AK、SK，所需权限如下：
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/payer-iam-permission.png)
 
-2. 创建组织账号，并录入account Id、AK、SK，以及dashboard链接。
+- 创建组织账号，并录入account Id、AK、SK，以及dashboard链接。
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/step1.png)
 
-3. 创建新用户，关联到对应组织。
+- 创建新用户，关联到对应组织。
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/step2.png)
 
 ### 设置组织SCP策略
