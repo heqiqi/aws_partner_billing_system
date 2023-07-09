@@ -47,39 +47,42 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/domains-permission.png)
      
 ### 组织配置部署
-- 设置Stackset 
-    * 通过组织的StackSet，在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号内。在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
+- 设置Stackset,在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号S3 Bucket内
+    * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
+    * 在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
 - 设置Lambda function，同步复制CUR到Payer S3 Bucket
     * 设置新的lambda execution role，命名为：`Lambda-List-S3-Role`， role 的权限如下
         * 内置权限
-            `{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "S3ListBucket",
-            "Effect": "Allow",
-            "Action": [
-                "s3:ListBucket"
-            ],
-            "Resource": "arn:aws:s3:::org-lead-cur-*"
-        },
-        {
-            "Sid": "logsstreamevent",
-            "Effect": "Allow",
-            "Action": [
-                "logs:CreateLogStream",
-                "logs:PutLogEvents"
-            ],
-            "Resource": "arn:aws:logs:us-east-1:<payer account Id>:log-group:/aws/lambda/Lambda-List-S3*/*"
-        },
-        {
-            "Sid": "logsgroup",
-            "Effect": "Allow",
-            "Action": "logs:CreateLogGroup",
-            "Resource": "*"
-        }
-    ]
-}`
+            ```json
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                {
+                    "Sid": "S3ListBucket",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:ListBucket"
+                        ],
+                        "Resource": "arn:aws:s3:::org-lead-cur-*"
+                },
+                {
+                    "Sid": "logsstreamevent",
+                    "Effect": "Allow",
+                    "Action": [
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents"
+                    ],
+                    "Resource": "arn:aws:logs:us-east-1:<payer account Id>:log-group:/aws/lambda/Lambda-List-S3*/*"
+                },
+                {
+                    "Sid": "logsgroup",
+                    "Effect": "Allow",
+                    "Action": "logs:CreateLogGroup",
+                    "Resource": "*"
+                }
+                ]
+            }            
+            ```
         * 托管权限
         ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/permission-lambda.png)
     * 创建Lambda function，源码为: `lambda/cpy_linked_s3_to_payer.py`, 执行role使用`Lambda-List-S3-Role`
@@ -111,6 +114,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
         * `python3 manage.py runserver 0.0.0.0:8000`
         * `gunicorn -c gunicorn_conf.py application.asgi:application`
     * 根据部署方式，将/api/*的请求路由到正确后端服务
+    * 如需使用邮件通知服务，请配置`backend/application/settings.py`中的“smpt服务器地址”
 ## 首次设置
 ### 设置后台
 首次登录的管理员用户名：superadmin，密码为：admin123456

@@ -44,7 +44,7 @@ Resources:
           - Sid: Stmt1565731301209
             Effect: Allow
             Principal: 
-              AWS: arn:aws:iam::704569129831:role/Lambda-List-S3-Role
+              AWS: arn:aws:iam::<payer account Id>:role/Lambda-List-S3-Role
             Action: 
               - s3:ListBucket
               - s3:*
