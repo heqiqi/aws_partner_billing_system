@@ -66,8 +66,8 @@ class AwsBillingConductorGroupModelViewSet(ViewSet):
         return AwsCliService(ak, sk)
 
     def get_dynamodb_client(self, request):
-        ak = request.user.dept.access_key
-        sk = request.user.dept.secret_key
+        ak = request.user.dept.access_key if request.user.dept is not None else None
+        sk = request.user.dept.secret_key if request.user.dept is not None else None
         accId = getAccountIdFromRequest(request)
         if accId is not None:
             dept = Dept.objects.filter(account_id=accId)

@@ -12,10 +12,10 @@
     </el-select>
     </div>
     <hr>
-    <el-card v-loading="!showEchart">
+    <el-card v-loading="!showEchart" >
       <div  class="circle-chart">
       <div id="myChart" style="height: 100%; width: 50%;"></div>
-        <div class="info-block-container">
+        <div class="info-block-container" v-if="!emptyContent">
           <div class="info-block">
             <div class="fee-type-style">总收入：</div>
             <h2>{{totalCharged | currencyFormat}}</h2>
@@ -33,9 +33,8 @@
             <h2>{{countAccount}}</h2>
           </div>
         </div>
-      <el-empty style="position: absolute;padding: 0px 0!important;width: 100%;" v-if="emptyContent" description="未查到任何账单组信息,请新增。"></el-empty>
+      <el-empty style="position: absolute;padding: 0px 0!important;width: 100%;" v-if="emptyContent" description="未查到任何账单组信息,请点击右下按钮“新增”。"></el-empty>
       </div>
-      <el-empty style="position: absolute;padding: 0px 0!important;width: 100%;" v-if="emptyContent" description="未查到任何账单组信息,请新增。"></el-empty>
     </el-card>
     <br>
     <el-card v-loading="!showEchart">
@@ -419,7 +418,6 @@ export default {
           item.account_id = item.account_id.toString(); return item
         })
         if (this.$store.state.d2admin.billgroup.selectedAccount === undefined) {
-          console.log('selectedAccount is undefined')
           this.$store.commit('d2admin/billgroup/modify', 0)
         }
         this.selectedAccount = this.$store.state.d2admin.billgroup.selectedAccount
