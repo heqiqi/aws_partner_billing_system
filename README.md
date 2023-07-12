@@ -37,9 +37,10 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 ## 部署步骤
 ### Dashboard部署
 - 参考 [Cost Intelligent Dashiboard](https://www.wellarchitectedlabs.com/cost/200_labs/200_cloud_intelligence/cost-usage-report-dashboards/dashboards/deploy_dashboards/)，创建Dashboard
-- 设置QuickSight看板共享
-    * 进入Cost Intelligent Dashboard
+    * cloudformation的参数
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/dashboard-cfn.png)
+- 设置QuickSight看板共享
+    * 进入QuickSight的Cost Intelligent Dashboard
     * 点击共享，设置为public，并记录下embed code
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/set-share.png)
     * 设置域名访问权限:
