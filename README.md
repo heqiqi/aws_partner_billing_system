@@ -97,6 +97,22 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
     * 新建Lambda函数，Execution Role仍然为：`Lambda-List-S3-Role`
     * 函数源代码为：`lambda/athena_query_lambda.py`
     * 新建EventBridge Rule，将 Glue crawler的完成状态作为 event，此lambda函数作为target。
+      event pattern:
+      ```
+      {
+          "source": [
+          "aws.glue"
+      ],
+      "detail-type": [
+        "Glue Crawler State Change"
+      ],
+      "detail": {
+        "state": [
+          "Succeeded"
+        ]
+      }
+    }
+    ```
     * 使用上一步创建的EventBridge Rule 做为trigger，在crawler完成是启动lambda。
 ### 管理后台部署
 - 前端部署
