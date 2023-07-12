@@ -7,11 +7,9 @@ import logging
 logger = logging.getLogger(__name__)
 logger.info("test logging")
 
-# ACCOUNT_ID = "227976579875"
 
+# update ACCOUNT_ID_LIST match your linked account id
 ACCOUNT_ID_LIST = ["125391047781", "331059269292", "227976579875"]
-
-# ACCOUNT_ID = "331059269292"
 
 def next_month():
     month = current_month()
