@@ -7,9 +7,23 @@ import logging
 logger = logging.getLogger(__name__)
 logger.info("test logging")
 
+ACCOUNT_ID_LIST = []
 
-# update ACCOUNT_ID_LIST match your linked account id
-ACCOUNT_ID_LIST = ["125391047781", "331059269292", "227976579875"]
+def get_linked_account_list():
+    accList = get_active_accounts()
+    return [acc['Id'] for acc in accList]
+
+def get_active_accounts():
+    client = boto3.client('organizations')
+    paginator = client.get_paginator('list_accounts')
+
+    active_accounts = []
+    for page in paginator.paginate():
+        for account in page['Accounts']:
+            if account['Status'] == 'ACTIVE':
+                active_accounts.append(account)
+
+    return active_accounts
 
 def next_month():
     month = current_month()
@@ -139,13 +153,26 @@ def parse_csv_to_ddb(account_id, month, table_name):
                     continue
                 dynamodb_table.put_item(Item=item)
 
+def list_crawlers(crawer_name):
+    glue = boto3.client('glue')
+    response = glue.get_crawler(Name=crawer_name)
+    #crawlers = response['Crawlers']
+    logger.error("list_crawler for {} response: {}: ".format(crawer_name, str(response)))
+
 def get_invoke_account_id(context):
     return context.invoked_function_arn.split(":")[4]
 
 def lambda_handler(event, context):
-    logger.info("lambda_handler event: {}".format(event))
+    logger.error("lambda_handler event: {}".format(event))
     executor = get_invoke_account_id(context)
+    ACCOUNT_ID_LIST = get_linked_account_list()
+    logger.error("ACCOUNT_ID_LIST: {}".format(ACCOUNT_ID_LIST))
     for ACCOUNT_ID in ACCOUNT_ID_LIST:
+        try:
+            list_crawlers("cur_crawler_{}".format(ACCOUNT_ID))
+        except Exception as e:
+            logger.error("crawler not exist: "+str(e))
+            continue
         database = "monthly-cur-{}".format(ACCOUNT_ID)
         ddb_database = "monthly-cur-{}".format("whole-org")
         query = '''SELECT "product_product_name", "line_item_usage_type", "line_item_line_item_description", "bill_payer_account_id", round(sum("line_item_usage_amount"),3) as "usage_quantity", "pricing_unit", round(sum("line_item_unblended_cost"),2) as cost from "{}"."organization_enable_cur"

@@ -83,15 +83,9 @@ class AwsBillingConductorGroupModelViewSet(ViewSet):
         """
         获取pricing_plans列表
         """
-        ak = request.user.dept.access_key
-        sk = request.user.dept.secret_key
-        accId = getAccountIdFromRequest(request)
-        if accId is not None:
-            dept = Dept.objects.filter(account_id=accId)
-            ak = dept[0].access_key
-            sk = dept[0].secret_key
-        logger.info('new list function')
-        aws_client = AwsCliService(ak, sk)
+
+        logger.info('list_pricing_plans')
+        aws_client = self.getAwsClient(request)
         load = self.genPayload(request)
         billing_group = aws_client.list_pricing_plans(load)
         return DetailResponse(data=billing_group)
@@ -205,15 +199,8 @@ class AwsBillingConductorGroupModelViewSet(ViewSet):
     def create_pricing_plan_rule(self, request):
         request_data = request.data
         logger.info("create_pricing_plan_rule:\n\n{}".format(request.data))
-        ak = request.user.dept.access_key
-        sk = request.user.dept.secret_key
-        accId = getAccountIdFromRequest(request)
         logger.info("create_pricing_plan_rule accoundId:\n\n{}".format(accId))
-        if accId is not None:
-            dept = Dept.objects.filter(account_id=accId)
-            ak = dept[0].access_key
-            sk = dept[0].secret_key
-        aws_client = AwsCliService(ak, sk)
+        aws_client = self.getAwsClient(request)
         discount = 100 - int(request_data['discount'])
         dType = 'DISCOUNT' if discount >= 0 else 'MARKUP'
         if discount < 0:

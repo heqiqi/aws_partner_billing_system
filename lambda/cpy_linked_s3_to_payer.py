@@ -75,8 +75,8 @@ def prefix_exits(s3, bucket, prefix):
 def list_crawlers(crawer_name):
     glue = boto3.client('glue')
     response = glue.get_crawler(Name=crawer_name)
-    crawlers = response['Crawlers']
-    print(str(response))
+    # crawlers = response['Crawlers']
+    print("list_crawler: "+str(response))
 
 
 def lambda_handler(event, context):
@@ -101,7 +101,7 @@ def lambda_handler(event, context):
                 print('copying..')
                 copy_all_objects_in_folder(LINKED_CUR_PREFIX+acc, OBJECT_KEY+acc, TARGET_BUKET+aws_account_id, acc+'/monthly')
                 print("copy done")
-                list_crawlers('cur_crawler_227976579875')
+                list_crawlers("cur_crawler_{}".format(acc))
             else:
                 print("not existed")
         except Exception as e:
