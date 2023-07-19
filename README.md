@@ -52,6 +52,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
     * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
     * 在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
 - 设置Lambda function，同步复制CUR到Payer S3 Bucket
+![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/OCA-Billing-System-Arch.png)
     * 设置新的lambda execution role，命名为：`Lambda-List-S3-Role`， role 的权限如下
         * 内置权限
             ```json
