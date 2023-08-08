@@ -71,7 +71,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
                         "logs:CreateLogStream",
                         "logs:PutLogEvents"
                     ],
-                    "Resource": "arn:aws:logs:us-east-1:<payer account Id>:log-group:/aws/lambda/Lambda-List-S3*/*"
+                    "Resource": "arn:aws:logs:us-east-1:<payer account Id>:log-group:/aws/lambda/*"
                 },
                 {
                     "Sid": "logsgroup",
@@ -82,6 +82,21 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
                 ]
             }            
             ```
+        *Trust Relationships
+        ```json
+            {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "lambda.amazonaws.com"
+                         },
+                    "Action": "sts:AssumeRole"
+                    }
+                ]
+            }
+        ```
         * 托管权限
         ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/permission-lambda.png)
     * 创建Lambda function，源码为: `lambda/cpy_linked_s3_to_payer.py`, 执行role使用`Lambda-List-S3-Role`
