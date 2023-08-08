@@ -48,9 +48,6 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/domains-permission.png)
      
 ### 组织配置部署
-- 设置Stackset,在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号S3 Bucket内
-    * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
-    * 在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
 - 设置Lambda function，同步复制CUR到Payer S3 Bucket
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/OCA-Billing-System-Arch.png)
     * 设置新的lambda execution role，命名为：`Lambda-List-S3-Role`， role 的权限如下
@@ -89,7 +86,9 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
         ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/permission-lambda.png)
     * 创建Lambda function，源码为: `lambda/cpy_linked_s3_to_payer.py`, 执行role使用`Lambda-List-S3-Role`
     * 使用EventBridge设置cronjob rule，设置为UTC时间2:00
-
+- 设置Stackset,在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号S3 Bucket内
+    * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
+    * 在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
 - 设置Glue Crawler，定时使用新的CUR，更新Database
     * Crawler 命名为：`cur_crawler_<linked account Id>`
     * Glue Catalog Database 命名为：`monthly-cur-<linked account Id>`
