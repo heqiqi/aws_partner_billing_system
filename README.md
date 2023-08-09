@@ -104,6 +104,8 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 - 设置Stackset,在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号S3 Bucket内
     * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
     * 在Cloudformation 控制台，点击创建新的StackSet，选择us-east-1 region，选择所有linked account，然后使用模版`cloudformation/Cur-S3.template.yml`创建。
+- 在Payer账号下配置DynamoDB和保存Linked账号CUR数据的S3存储桶
+    * 使用`cloudformation/Linked-Cur-S3-DDB.yml` 创建Stack
 - 设置Glue Crawler，定时使用新的CUR，更新Database
     * Crawler 命名为：`cur_crawler_<linked account Id>`
     * Glue Catalog Database 命名为：`monthly-cur-<linked account Id>`
