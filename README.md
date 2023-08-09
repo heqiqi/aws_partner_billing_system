@@ -82,7 +82,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
                 ]
             }            
             ```
-        *Trust Relationships
+        * Trust Relationships
         ```json
             {
                     "Version": "2012-10-17",
