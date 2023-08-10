@@ -100,6 +100,7 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
         * 托管权限
         ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/permission-lambda.png)
     * 创建Lambda function，源码为: `lambda/cpy_linked_s3_to_payer.py`, 执行role使用`Lambda-List-S3-Role`
+    * 在Configuration-->General configure 中将运行内存设为：1024 MB， Timeout设为： 10 min。
     * 使用EventBridge设置cronjob rule，设置为UTC时间2:00
 - 设置Stackset,在每个Linked的账户内开启Cost Usage Report，并将parque格式的CUR保存在link账号S3 Bucket内
     * 修改`cloudformation/Cur-S3.template.yml`， 将`<payer account Id>`替换为payer accound Id
@@ -109,11 +110,12 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 - 设置Glue Crawler，定时使用新的CUR，更新Database
     * Crawler 命名为：`cur_crawler_<linked account Id>`
     * Glue Catalog Database 命名为：`monthly-cur-<linked account Id>`
-    * Crawler 爬取S3路径为：`s3://org-cur-integration-<payer account Id>/<linked account Id>/monthly`
+    * Crawler 爬取S3路径为：`s3://org-cur-integration-<payer account Id>/<linked account Id>/monthly/organization-enable-cur/organization-enable-cur/`
     * Crawler 定时执行，执行时间为UTC时间2:30
 - 设置Lambda function，每天将解析后的用量报告同步到DynamoDB
     * 新建Lambda函数，Execution Role仍然为：`Lambda-List-S3-Role`
     * 函数源代码为：`lambda/athena_query_lambda.py`
+    * 在Configuration-->General configure 中将运行内存设为：1024 MB， Timeout设为： 10 min。
     * 新建EventBridge Rule，将 Glue crawler的完成状态作为 event，此lambda函数作为target。
       event pattern:
       ```

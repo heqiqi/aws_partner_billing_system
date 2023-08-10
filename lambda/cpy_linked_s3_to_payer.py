@@ -10,10 +10,8 @@ LINKED_CUR_PREFIX = 'organization-enable-cur-'
 ##OBJECT_KEY = 'cost-monthly-parquet/cost-monthly-parquet/cost-monthly-parquet/year=2023/month=6/cost-monthly-parquet-00001.snappy.parquet'
 OBJECT_KEY = 'monthly-cur-'
 TARGET_BUKET = 'org-cur-integration-'
-
-
 region = os.environ['AWS_REGION']
-cur_bucket = os.environ['ORG_CUR_BUCKET']
+#cur_bucket = os.environ['ORG_CUR_BUCKET']
 
 
 def generate_obj_prefix():
@@ -81,16 +79,9 @@ def list_crawlers(crawer_name):
 
 def lambda_handler(event, context):
     aws_account_id = get_invoke_account_id(context)
-    print('#####account id:{} bucket: {}'.format(aws_account_id, cur_bucket))
+    print('account id:{} bucket: {}'.format(aws_account_id, TARGET_BUKET+aws_account_id))
      # Create an S3 client
     s3 = boto3.client('s3')
-      # begin: Call S3 to list current buckets
-      # objlist = s3.list_objects(
-      #                 Bucket='organization-enable-cur-227976579875',
-      #                 MaxKeys = 10)
-      # print(str(objlist))
-      # end
-
     accout_list = get_linked_account_list()
     for acc in accout_list:
         print('account: {}'.format(acc))
