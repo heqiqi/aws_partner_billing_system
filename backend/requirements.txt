@@ -46,7 +46,6 @@ Jinja2==3.1.2
 jmespath==1.0.1
 MarkupSafe==2.0.1
 msgpack==1.0.5
-mysqlclient==2.1.1
 openpyxl==3.1.2
 packaging==23.0
 Pillow==9.4.0
