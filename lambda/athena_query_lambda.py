@@ -236,7 +236,12 @@ def lambda_handler(event, context):
             run_athena_query(query, database, bucket, s3_output)
             parse_csv_to_ddb(ACCOUNT_ID, last_month(), ddb_database)
             print("athena query for last month, since billing: {}, query: {}".format(is_billing_finalized(), query))
-
+# select
+# CAST("line_item_usage_start_date" AS DATE) as usage_date, sum("line_item_unblended_cost") AS total_cost
+# from "grafana_cur" 
+# where "bill_billing_period_start_date" >= cast('2023-08-01' as DATE)
+# GROUP BY 1
+# limit 10
     return {
         'statusCode': 200,
         'body': json.dumps('Complete')
