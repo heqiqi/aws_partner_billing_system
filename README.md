@@ -36,6 +36,8 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
 
 ## 部署步骤
 ### Dashboard部署
+Dashboard主要起到数据可视化已经BI的功能，方便伙伴对cost有直观的了解。目前，有两种实现方式： 
+#### 1. Quicksight方式，AWS的官方可视化方案，功能全面，数据维度多，但是需要Quicksight 企业版，有一定费用。
 - 参考 [Cost Intelligent Dashiboard](https://www.wellarchitectedlabs.com/cost/200_labs/200_cloud_intelligence/cost-usage-report-dashboards/dashboards/deploy_dashboards/)，创建Dashboard
     * cloudformation的参数
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/dashboard-cfn.png)
@@ -46,7 +48,10 @@ AWS伙伴账单系统是一种高效的财务管理工具，通过采用API形�
     * 设置域名访问权限:
     ```在QuickSight右上角，点击"Manage QuickSight",在左侧点击“Domains and Embedding”```
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/domains-permission.png)
-     
+#### 2. 自建Grafana方式，民间可视化方案，基本功能完整，价格亲民，但是开箱即用的功能略少。
+- 参考 [基于 Grafana 实现云资源成本及使用量的可视化分析](https://aws.amazon.com/cn/blogs/china/visualizing-cloud-resource-costs-and-usage-based-on-grafana/)，创建Dashboard。
+功能展示：
+  ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/cure-dashboard-grafana.gif)
 ### 组织配置部署
 - 设置Lambda function，同步复制CUR到Payer S3 Bucket
 ![image](https://github.com/heqiqi/aws_partner_billing_system/blob/main/data/img/OCA-Billing-System-Arch.png)
