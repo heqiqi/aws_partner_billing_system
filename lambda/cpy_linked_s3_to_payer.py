@@ -97,7 +97,6 @@ def lambda_handler(event, context):
                 print("not existed")
         except Exception as e:
                 print(e)
-        break
 
     result = {"msg": "ok"}
     return str(result)
