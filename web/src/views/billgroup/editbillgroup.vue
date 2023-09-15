@@ -2,7 +2,7 @@
   <d2-container class="page">
     <p style="color: #909399" >{{ this.billgroup.Arn == 'create' ? '创建账单组' : '编辑账单组'}}</p>
     <hr>
-    <el-tabs :tab-position="tabPosition" style="height: 90vh;">
+    <el-tabs :tab-position="tabPosition" style="height: 90vh; overflow-y: scroll">
       <el-tab-pane label="账单折扣管理">
         <el-card v-loading="!showCard" v-if="isCreatePlan">
           <el-form :model="ruleForm" :rules="rules" ref="ruleForm" label-width="100px" class="ruleForm">
