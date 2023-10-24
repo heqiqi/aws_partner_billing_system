@@ -43,9 +43,19 @@ class AwsOrganizationViewSet(ViewSet):
         listAccounts
         """
         client = self.getAwsClient(request)
-        accountList = client.list_accounts()
-        logger.info('{}'.format(accountList))
-        return DetailResponse(accountList[u'Accounts'])
+        paginator = client.get_paginator('list_accounts')
+        page_iterator = paginator.paginate()
+
+        totalAccount = []
+        for page in page_iterator:
+            for acct in page[u'Accounts']:
+                totalAccount.append(acct)
+        # payLoad = {
+        #     'MaxResults': 20
+        # }
+        # accountList = client.list_accounts(**payLoad)
+        logger.info('{}'.format(totalAccount))
+        return DetailResponse(totalAccount)
 
     @swagger_auto_schema(method='post', request_body=invite_account)
     @action(methods=['POST'], detail=False, permission_classes=[IsAuthenticated])
