@@ -178,7 +178,16 @@
       </div>
     </el-dialog>
 
-    <el-dialog title="账单详情" :visible.sync="billTableVisible" width="80%">
+    <el-dialog :visible.sync="billTableVisible" @close="billingDialogClose" width="80%">
+      <div slot="title" class="dialog-title">
+        <el-row>
+          <span class="dialog-title-text">账单详情</span>
+          <el-button-group style="float: right; margin-right: 5vw;">
+            <el-button  @click="getBillingLast(false)">上月</el-button>
+            <el-button @click="getBillingLast(true)">本月</el-button>
+          </el-button-group>
+        </el-row>
+      </div>
       <el-table :data="billItems" v-loading="loadingBillData">
         <el-table-column property="product_product_name" label="产品" width="160"></el-table-column>
         <el-table-column property="line_item_usage_type" label="种类" width="170"></el-table-column>
@@ -254,7 +263,8 @@ export default {
       loadingBillData: false,
       billItems: [],
       closeAccountvisible: false,
-      readyTodeleteAccount: {}
+      readyTodeleteAccount: {},
+      tmpViewingAccId: 0
     }
   },
   watch: {
@@ -276,6 +286,10 @@ export default {
         method: 'get',
         params: query
       })
+    },
+    billingDialogClose () {
+      console.log('billingDialogClose')
+      this.tmpViewingAccId = 0
     },
     async accountInOrgRequest (query) {
       const account = await GetAccountList(query)
@@ -359,6 +373,26 @@ export default {
       await this.policyListRequest({ account_id: this.accountList[this.selectedAccount].account_id, TargetId: this.targeId })
       this.policiesLoading = false
     },
+    async getBillingLast (isCurr) {
+      this.loadingBillData = true
+      try {
+        this.$message({
+          message: '获取中...',
+          type: 'info'
+        })
+        const response = await GetBillItems({ is_current_month: isCurr, account_id: this.accountList[this.selectedAccount].account_id, bill_account_id: this.tmpViewingAccId })
+        console.log('billDetail ' + JSON.stringify(response))
+        this.billItems = response.data
+      } catch (e) {
+        console.log(e)
+        this.$message({
+          message: '  获取失败',
+          type: 'error'
+        })
+      } finally {
+        this.loadingBillData = false
+      }
+    },
     async billDetail (account) {
       this.billTableVisible = true
       this.loadingBillData = true
@@ -367,7 +401,7 @@ export default {
           message: '发送中...',
           type: 'info'
         })
-        const response = await GetBillItems({ account_id: this.accountList[this.selectedAccount].account_id, bill_account_id: account.Id })
+        const response = await GetBillItems({ is_current_month: true, account_id: this.accountList[this.selectedAccount].account_id, bill_account_id: account.Id })
         console.log('billDetail ' + JSON.stringify(response))
         // {
         //   "cost": "0.17",
@@ -382,6 +416,7 @@ export default {
         //   "line_item_usage_type": "BoxUsage:t3.medium"
         // }
         this.billItems = response.data
+        this.tmpViewingAccId = account.Id
       } catch (e) {
         console.log(e)
         this.$message({

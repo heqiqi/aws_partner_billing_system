@@ -91,7 +91,7 @@
               <el-select style="width: 40%" v-model="billgroup.ComputationPreference.PricingPlanArn" placeholder="请选择计划">
                 <el-option v-for="pp in pricePlans" :label="pp.Name"  :value="pp.Arn" :key="pp.Arn">{{pp.Name}}</el-option>
               </el-select>
-<!--                        <el-button type="primary" round plain style="margin-left: 2vw" @click="showPlanRule()">详情</el-button>-->
+              <el-button type="primary" round plain style="margin-left: 2vw" @click="showPlanRule(billgroup.ComputationPreference.PricingPlanArn)">详情</el-button>
               <el-button type="primary" round plain style="margin-left: 2vw" @click="showPlanForm('pPlanForm')">新增</el-button>
             </el-form-item>
           </el-form>
@@ -141,12 +141,12 @@
               label="操作"
               width="120">
               <template slot-scope="scope">
-                <el-button
-                  @click.native.prevent="editCustomLine(scope.row)"
-                  type="text"
-                  size="small">
-                  编辑
-                </el-button>
+<!--                <el-button-->
+<!--                  @click.native.prevent="editCustomLine(scope.row)"-->
+<!--                  type="text"-->
+<!--                  size="small">-->
+<!--                  编辑-->
+<!--                </el-button>-->
                 <el-button
                   @click="deleteCustomLine(scope.row)"
                   type="text"
@@ -219,10 +219,9 @@
         <el-button type="primary" @click="doCreateOperation">确 定</el-button>
       </div>
     </el-dialog>
-<!--    <PriceRuleInfo-->
-<!--      :visible.sync="pRuleDetailsVisible"-->
-<!--      :arn="priceRuleArn"-->
-<!--      />-->
+    <PriceRuleInfo
+      ref="PriceRuleDialog"
+    />
   </d2-container>
 </template>
 
@@ -234,12 +233,13 @@ import {
   ListPricingPlans, UpdateBillingGroup
 } from '@/views/billgroup/api'
 import axios from 'axios'
+import PriceRuleInfo from '@/views/billgroup/components/PriceRuleInfo.vue'
 
 export default {
   name: 'bill_group_form',
-  // components: {
-  //   PriceRuleInfo
-  // },
+  components: {
+    PriceRuleInfo
+  },
   data () {
     const regex = /^[a-zA-Z0-9]+$/
     const validateName = (rule, value, callback) => {
@@ -471,8 +471,9 @@ export default {
     showPlanForm (f) {
       this.dialogFormVisible = true
     },
-    showPlanRule () {
-      this.pRuleDetailsVisible = true
+    showPlanRule (arn) {
+      console.log('showPlanRule arn: ' + arn)
+      this.$refs.PriceRuleDialog.showDialog(arn)
     },
     confirmCreatePlan (f) {
       this.$message({

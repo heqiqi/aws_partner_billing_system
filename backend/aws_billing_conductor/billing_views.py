@@ -383,30 +383,36 @@ class AwsBillingConductorGroupModelViewSet(ViewSet):
         else:
             return ErrorResponse(msg='No pricing rule found')
 
-    def get_billings(self, dynamodb, b_account_id):
+    def get_billings(self, dynamodb, b_account_id, is_current_month):
         table = dynamodb.Table('monthly-cur-whole-org')
+        today = datetime.today()
+        monthStr = str(datetime.now().month)
+        if is_current_month == '0':
+            monthStr = str((today.month - 1) if (today.month > 1) else 12)
         return table.query(
             KeyConditionExpression='#partitionKeyName = :partitionkeyval',
             ExpressionAttributeNames={
                 '#partitionKeyName': 'account_month',
             },
             ExpressionAttributeValues={
-                ':partitionkeyval': b_account_id + "_" + str(datetime.now().month),
+                ':partitionkeyval': b_account_id + "_" + monthStr,
             }
         )
     @action(methods=['GET'], detail=False, permission_classes=[IsAuthenticated])
     def account_monthly_bill(self, request):
         b_account_id = request.GET.copy().get('bill_account_id', None)
+        is_current_month = request.GET.copy().get('is_current_month', None)
         dynamodb = self.get_dynamodb_client(request)
-        response = self.get_billings(dynamodb, b_account_id)
+        response = self.get_billings(dynamodb, b_account_id, is_current_month)
         items = response['Items']
         return DetailResponse(data=items)
 
     @action(methods=['GET'], detail=False, permission_classes=[IsAuthenticated])
     def download_monthly_bill(self, request):
         b_account_id = request.GET.copy().get('bill_account_id', None)
+        is_current_month = request.GET.copy().get('is_current_month', None)
         dynamodb = self.get_dynamodb_client(request)
-        response = self.get_billings(dynamodb, b_account_id)
+        response = self.get_billings(dynamodb, b_account_id, is_current_month)
         items = response['Items']
         response = HttpResponse(content_type='text/csv')
         response['content-disposition'] = 'attachment; filename="account{}_{}-{}_bill.csv"'.format(b_account_id, str(datetime.now().year), str(datetime.now().month))
