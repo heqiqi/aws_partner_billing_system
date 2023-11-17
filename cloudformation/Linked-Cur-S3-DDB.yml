@@ -31,18 +31,18 @@ Parameters:
   RangeKeyElementName:
     Description: HashType PrimaryKey Name
     Type: String
-    Default: 'product_usage_type_quantity'
+    Default: 'createAt'
     AllowedPattern: '[a-zA-Z0-9|_]*'
-    MinLength: '1'
+    MinLength: '5'
     MaxLength: '2048'
     ConstraintDescription: must contain only alphanumberic characters
   RangeKeyElementType:
     Description: HashType PrimaryKey Type
     Type: String
-    Default: 'S'
+    Default: 'N'
     AllowedPattern: '[S|N]'
-    MinLength: '1'
-    MaxLength: '1'
+    MinLength: '5'
+    MaxLength: '2048'
     ConstraintDescription: must be either S or N
   ReadCapacityUnits:
     Description: Provisioned read throughput

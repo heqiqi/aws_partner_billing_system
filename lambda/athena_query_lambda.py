@@ -2,6 +2,7 @@ import json
 import boto3
 import time
 import csv
+import os
 from datetime import datetime, timedelta
 import logging
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ def delete_item(table_name, partition_key, sort_key=None):
     for i in items:
         key = {
             'account_month': partition_key,
-            'product_usage_type_quantity': i['product_usage_type_quantity']
+            'createAt': i['createAt']
         }
         if sort_key is not None:
             key['product_usage_type_quantity'] = sort_key
@@ -165,8 +166,9 @@ def parse_csv_to_ddb(account_id, month, table_name):
     dynamodb_table = dynamodb.Table(table_name)
     logger.info("delete {}".format(str(account_id)+"_"+str(month)))
     delete_item(table_name, str(account_id)+"_"+str(month))
-    logger.info("delete  complete")
-
+    if not os.path.exists('/tmp/results.csv'):
+        print('/tmp/results.csv not exit')
+        return
     with open('/tmp/results.csv', 'r') as data:
         next(data)  # Skip the header row
         reader = csv.reader(data)
@@ -174,7 +176,7 @@ def parse_csv_to_ddb(account_id, month, table_name):
             # logger.info("row: {}".format(row))
             item = {
                 'account_month': str(account_id)+"_"+str(month),
-                'product_usage_type_quantity': row[0]+row[1]+row[3],
+                'product_usage_type_quantity': row[0]+row[1]+'_payer:'+row[3],
                 'product_product_name': row[0],
                 'line_item_usage_type': row[1],
                 'line_item_line_item_description': row[2],
