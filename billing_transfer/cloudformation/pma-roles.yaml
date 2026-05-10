@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Partner Central Channel Management Roles - Deploy in Program Management Account (PMA) ONLY'
+
+Parameters:
+  PartnerCentralLinkedAccountId:
+    Type: String
+    Description: 'Your 12-digit AWS Partner Central linked AWS account ID'
+    AllowedPattern: '[0-9]{12}'
+    ConstraintDescription: 'Must be a valid 12-digit AWS account ID'
+
+  EnableBillingTransferManagement:
+    Type: String
+    Description: 'Set to true to create the optional BillingTransferManagement role (enables "Manage in AWS Billing" button in Partner Central)'
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+Conditions:
+  CreateManagementRole: !Equals [!Ref EnableBillingTransferManagement, 'true']
+
+Resources:
+  # ============================================================================
+  # Handshake Approval Role
+  # Purpose: Activates PMA via channel handshakes between Partner Central and this account
+  # Documentation: https://docs.aws.amazon.com/partner-central/latest/APIReference/channel-access-control.html
+  # ============================================================================
+  PartnerCentralChannelHandshakeApprovalManagement:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PartnerCentralChannelHandshakeApprovalManagement
+      Description: 'Manages handshakes between Partner Central and this Program Management Account'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: partnercentral-account-management.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSPartnerCentralChannelHandshakeApprovalManagement'
+      Tags:
+        - Key: Purpose
+          Value: 'PMA Handshake Approval'
+        - Key: ManagedBy
+          Value: 'CloudFormation'
+        - Key: DeploymentTarget
+          Value: 'ProgramManagementAccount'
+
+  # ============================================================================
+  # Billing Transfer Read-Only Role
+  # Purpose: Enables billing transfer status visibility from Partner Central
+  # Note: This is a cross-account role assumed by the APN Linked Account.
+  #        The trust policy must reference YOUR APN Linked Account ID.
+  #        Replace {PartnerCentralLinkedAccountId} with your actual 12-digit account ID.
+  # ============================================================================
+  PartnerCentralChannelBillingTransferReadOnly:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PartnerCentralChannelBillingTransferReadOnly
+      Description: 'Cross-account role that enables billing transfer status visibility from Partner Central'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${PartnerCentralLinkedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: BillingTransferReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BillingTransferReadOnly
+                Effect: Allow
+                Action:
+                  - 'organizations:DescribeResponsibilityTransfer'
+                  - 'organizations:ListHandshakesForOrganization'
+                  - 'organizations:ListInboundResponsibilityTransfers'
+                  - 'organizations:ListOutboundResponsibilityTransfers'
+                Resource: '*'
+      Tags:
+        - Key: Purpose
+          Value: 'Billing Transfer Status Visibility'
+        - Key: ManagedBy
+          Value: 'CloudFormation'
+        - Key: DeploymentTarget
+          Value: 'ProgramManagementAccount'
+
+  # ============================================================================
+  # Billing Transfer Management Role (OPTIONAL)
+  # Purpose: Enables "Manage in AWS Billing" button in Partner Central
+  # Note: This role allows Partner Central users to create and manage billing
+  #        transfers directly from Partner Central without switching to the
+  #        AWS Billing and Cost Management console.
+  # Documentation: https://docs.aws.amazon.com/partner-central/latest/APIReference/channel-access-control.html
+  # ============================================================================
+  PartnerCentralChannelBillingTransferManagement:
+    Type: AWS::IAM::Role
+    Condition: CreateManagementRole
+    Properties:
+      RoleName: PartnerCentralChannelBillingTransferManagement
+      Description: 'Cross-account role that enables billing transfer management from Partner Central'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${PartnerCentralLinkedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: BillingTransferManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BillingTransferManagement
+                Effect: Allow
+                Action:
+                  - 'billingconductor:CreateBillingGroup'
+                  - 'billingconductor:ListPricingPlans'
+                  - 'organizations:AcceptHandshake'
+                  - 'organizations:CancelHandshake'
+                  - 'organizations:DeclineHandshake'
+                  - 'organizations:DescribeResponsibilityTransfer'
+                  - 'organizations:InviteOrganizationToTransferResponsibility'
+                  - 'organizations:ListHandshakesForAccount'
+                  - 'organizations:ListHandshakesForOrganization'
+                  - 'organizations:ListInboundResponsibilityTransfers'
+                  - 'organizations:ListOutboundResponsibilityTransfers'
+                  - 'organizations:TerminateResponsibilityTransfer'
+                  - 'organizations:UpdateResponsibilityTransfer'
+                Resource: '*'
+      Tags:
+        - Key: Purpose
+          Value: 'Billing Transfer Management from Partner Central'
+        - Key: ManagedBy
+          Value: 'CloudFormation'
+        - Key: DeploymentTarget
+          Value: 'ProgramManagementAccount'
+
+Outputs:
+  HandshakeRoleArn:
+    Description: 'ARN of the Handshake Approval Management Role'
+    Value: !GetAtt PartnerCentralChannelHandshakeApprovalManagement.Arn
+
+  BillingTransferReadOnlyRoleArn:
+    Description: 'ARN of the Billing Transfer Read-Only Role'
+    Value: !GetAtt PartnerCentralChannelBillingTransferReadOnly.Arn
+
+  BillingTransferManagementRoleArn:
+    Description: 'ARN of the Billing Transfer Management Role (optional)'
+    Value: !GetAtt PartnerCentralChannelBillingTransferManagement.Arn
+    Condition: CreateManagementRole
+
+  DeploymentAccount:
+    Description: 'Account where this template was deployed'
+    Value: !Ref 'AWS::AccountId'
+
+  NextSteps:
+    Description: 'What to do after deployment'
+    Value: 'Go to Partner Central Channel Management to create and activate this account as a PMA'

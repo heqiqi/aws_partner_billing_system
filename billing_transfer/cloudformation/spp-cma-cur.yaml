@@ -1,0 +1,1543 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Billing Transfer Activation Monitor with Automatic CUR Creation.
+  Creates per-customer S3 buckets and BCM Data Exports on activation.
+  Supports SPP two-tier model (Solution Provider -> Customer).
+  MUST be deployed in us-east-1.
+  Created by: saynerd & jrliz
+
+Parameters:
+
+  AlertEmail:
+    Type: String
+    Description: Email address to receive notifications
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Must be a valid email address
+
+  MSTeamsWebhookUrl:
+    Type: String
+    Description: (Optional) MS Teams webhook URL. Leave blank to skip.
+    Default: ''
+    NoEcho: true
+
+  LineNotifyToken:
+    Type: String
+    Description: (Optional) Line Notify token. Leave blank to skip.
+    Default: ''
+    NoEcho: true
+
+
+  S3BucketPrefix:
+    Type: String
+    Default: billing
+    Description: >
+      Prefix for per-customer CUR buckets. Each customer gets their own bucket:
+      {prefix}-cur-{account_id}. Must be lowercase, globally unique prefix.
+    AllowedPattern: '^[a-z0-9][a-z0-9\-]{1,30}[a-z0-9]$'
+    ConstraintDescription: Lowercase letters, numbers, hyphens. 3-32 chars.
+
+
+
+  ActivationCheckCron:
+    Type: String
+    Description: >
+      Cron for activation check. Default is 1st of month at 00:03 UTC.
+      3 minutes after 00:00 UTC allows time for AWS to propagate the ACTIVE
+      state to ListInboundResponsibilityTransfers after the billing period starts.
+    Default: 'cron(3 0 1 * ? *)'
+    AllowedPattern: '^cron\(.+\)$'
+
+  CURCreationSchedule:
+    Type: String
+    Description: >
+      Cron for CUR creation run. Default is 1st of month at 00:05 UTC.
+      Runs 2 minutes after the activation check (00:03 UTC) to allow time
+      for newly detected relationships to be written to DynamoDB before
+      CUR creation is triggered. Only ~5 minutes of data from 00:00-00:05
+      is missed - the minimum practical gap.
+    Default: 'cron(5 0 1 * ? *)'
+    AllowedPattern: '^cron\(.+\)$'
+Resources:
+
+  # ------ boto3 Layer Builder (self-contained, no external dependency) --
+  Boto3LayerBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LayerPublishAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:DeleteLayerVersion
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:bt-${AWS::StackName}-boto3-latest'
+
+  Boto3LayerBuilderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-boto3-layer-builder'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      MemorySize: 512
+      Role: !GetAtt Boto3LayerBuilderRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import os
+          import subprocess
+          import tempfile
+          import zipfile
+          import urllib.request
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def send_response(event, context, status, data=None, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'boto3-layer'),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {}
+              }).encode('utf-8')
+              req = urllib.request.Request(
+                  event['ResponseURL'], data=body,
+                  headers={'Content-Type': 'application/json', 'Content-Length': len(body)},
+                  method='PUT')
+              urllib.request.urlopen(req, timeout=10)
+
+          def handler(event, context):
+              logger.info(json.dumps(event))
+              layer_name = event['ResourceProperties']['LayerName']
+              client = boto3.client('lambda')
+
+              if event['RequestType'] == 'Delete':
+                  try:
+                      versions = client.list_layer_versions(LayerName=layer_name)
+                      for v in versions.get('LayerVersions', []):
+                          client.delete_layer_version(LayerName=layer_name, VersionNumber=v['Version'])
+                  except Exception as e:
+                      logger.warning(f"Layer cleanup warning: {e}")
+                  send_response(event, context, 'SUCCESS')
+                  return
+
+              try:
+                  with tempfile.TemporaryDirectory() as tmpdir:
+                      pkg_dir = os.path.join(tmpdir, 'python')
+                      os.makedirs(pkg_dir)
+                      subprocess.check_call([
+                          'pip', 'install', 'boto3', '--upgrade', '--quiet',
+                          '--target', pkg_dir
+                      ])
+                      zip_path = os.path.join(tmpdir, 'boto3-layer.zip')
+                      with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                          for root, dirs, files in os.walk(tmpdir):
+                              for file in files:
+                                  if file == 'boto3-layer.zip':
+                                      continue
+                                  full_path = os.path.join(root, file)
+                                  arcname = os.path.relpath(full_path, tmpdir)
+                                  zf.write(full_path, arcname)
+                      with open(zip_path, 'rb') as f:
+                          zip_bytes = f.read()
+
+                  resp = client.publish_layer_version(
+                      LayerName=layer_name,
+                      Description='Auto-built boto3 layer by CloudFormation',
+                      Content={'ZipFile': zip_bytes},
+                      CompatibleRuntimes=['python3.12'],
+                  )
+                  layer_arn = resp['LayerVersionArn']
+                  logger.info(f"Published layer: {layer_arn}")
+                  send_response(event, context, 'SUCCESS', data={'LayerArn': layer_arn})
+              except Exception as e:
+                  logger.exception("Layer build failed")
+                  send_response(event, context, 'FAILED', reason=str(e))
+
+  Boto3Layer:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: Boto3LayerBuilderFunction
+    Properties:
+      ServiceToken: !GetAtt Boto3LayerBuilderFunction.Arn
+      LayerName: !Sub 'bt-${AWS::StackName}-boto3-latest'
+
+  # ------ Region Validation ---------------------------------------------------------------------------------------------------------------------------
+  RegionValidationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  RegionValidationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-cur-region-validation'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt RegionValidationRole.Arn
+      Code:
+        ZipFile: |
+          import boto3, json, urllib.request, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def send(event, status, reason=''):
+              body = json.dumps({'Status': status, 'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'region-validation'),
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'], 'Data': {}}).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=body,
+                  headers={'Content-Type': 'application/json', 'Content-Length': len(body)}, method='PUT')
+              urllib.request.urlopen(req, timeout=10)
+          def handler(event, context):
+              logger.info(json.dumps(event, default=str))
+              if event['RequestType'] == 'Delete':
+                  send(event, 'SUCCESS'); return
+              region = boto3.session.Session().region_name
+              if region != 'us-east-1':
+                  send(event, 'FAILED', f"Must deploy in us-east-1, not '{region}'.")
+              else:
+                  send(event, 'SUCCESS', f"Region validated: {region}")
+
+  RegionValidation:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: RegionValidationFunction
+    Properties:
+      ServiceToken: !GetAtt RegionValidationFunction.Arn
+
+  # ------ Split Cost Allocation Validation ------------------------------------------------------------------------------
+  SplitCostValidationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SplitCostValidationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-cur-split-cost-validation'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt SplitCostValidationRole.Arn
+      Code:
+        ZipFile: |
+          import json, urllib.request, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def send(event, status, reason=''):
+              body = json.dumps({'Status': status, 'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'split-cost-validation'),
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'], 'Data': {}}).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=body,
+                  headers={'Content-Type': 'application/json', 'Content-Length': len(body)}, method='PUT')
+              urllib.request.urlopen(req, timeout=10)
+          def handler(event, context):
+              logger.info(json.dumps(event, default=str))
+              if event['RequestType'] == 'Delete':
+                  send(event, 'SUCCESS'); return
+              if event['ResourceProperties']['SplitCostAllocation'] == 'true':
+                  send(event, 'FAILED',
+                      'Split Cost Allocation is NOT compatible with Billing Transfer. '
+                      'Set EnableSplitCostAllocation to false and redeploy.')
+              else:
+                  send(event, 'SUCCESS', 'Split Cost Allocation correctly disabled.')
+
+  SplitCostValidation:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: SplitCostValidationFunction
+    Properties:
+      ServiceToken: !GetAtt SplitCostValidationFunction.Arn
+      SplitCostAllocation: 'false'
+  # ------ SNS Topic ---------------------------------------------------------------------------------------------------------------------------------------------------
+  ActivationAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-alerts'
+      DisplayName: Billing Transfer Activation and CUR Alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  ActivationAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ActivationAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ------ DynamoDB Tables ---------------------------------------------------------------------------------------------------------------------------------
+  ActivationLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-activation-log'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transfer_id
+          AttributeType: S
+        - AttributeName: activation_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transfer_id
+          KeyType: HASH
+        - AttributeName: activation_date
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  CURCreationLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-creation-log'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transfer_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transfer_id
+          KeyType: HASH
+        - AttributeName: created_at
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ------ Dead Letter Queues ------------------------------------------------------------------------------------------------------------------------
+  ActivationCheckDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'bt-${AWS::StackName}-cur-activation-check-dlq'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CURCreationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'bt-${AWS::StackName}-cur-creation-dlq'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # ------ IAM Roles ---------------------------------------------------------------------------------------------------------------------------------------------------
+  ActivationCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ActivationCheckPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - organizations:ListInboundResponsibilityTransfers
+                Resource: '*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ActivationAlertTopic
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt ActivationLogTable.Arn
+                  - !GetAtt CURCreationLogTable.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ActivationCheckDLQ.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                # Scoped to functions in this account/region with the env prefix
+                # Cannot use !GetAtt here - circular dependency (role needed to create function)
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:bt-${AWS::StackName}-*'
+              - Effect: Allow
+                Action:
+                  - bcm-data-exports:ListExports
+                  - bcm-data-exports:GetExport
+                  - billing:ListBillingViews
+                Resource: '*'
+
+  CURCreationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CURCreationPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bcm-data-exports:CreateExport
+                  - bcm-data-exports:GetExport
+                  - bcm-data-exports:ListExports
+                  - bcm-data-exports:UpdateExport
+                  - bcm-data-exports:TagResource
+                  - bcm-data-exports:GetTable
+                  - cur:PutReportDefinition
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - billingconductor:ListAccountAssociations
+                Resource: '*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ActivationAlertTopic
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt CURCreationLogTable.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CURCreationDLQ.Arn
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutLifecycleConfiguration
+                  - s3:HeadBucket
+                  - s3:PutBucketTagging
+                Resource: !Sub 'arn:aws:s3:::${S3BucketPrefix}-cur-*'
+              - Effect: Allow
+                Action:
+                  - partnercentral:ListRelationships
+                  - billing:ListBillingViews
+                  - sts:GetCallerIdentity
+                Resource: '*'
+  # ------ Activation Check Lambda ---------------------------------------------------------------------------------------------------------
+  ActivationCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-activation-check'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ActivationCheckRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Layers:
+        - !GetAtt Boto3Layer.LayerArn
+      DeadLetterConfig:
+        TargetArn: !GetAtt ActivationCheckDLQ.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref ActivationAlertTopic
+          ACTIVATION_TABLE: !Ref ActivationLogTable
+          CUR_LOG_TABLE: !Ref CURCreationLogTable
+          PMA_ACCOUNT_ID: !Sub '${AWS::AccountId}'
+          MS_TEAMS_WEBHOOK: !Ref MSTeamsWebhookUrl
+          LINE_NOTIFY_TOKEN: !Ref LineNotifyToken
+          DLQ_URL: !Ref ActivationCheckDLQ
+          CUR_CREATION_FUNCTION: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-creation'
+          RUN_MODE: 'CHECK_ONLY'
+      Code:
+        ZipFile: |
+          import json, os, logging
+          from datetime import datetime, timezone, timedelta
+          from urllib.request import Request, urlopen
+          import boto3
+          from botocore.config import Config
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          _retry = Config(retries={'max_attempts': 5, 'mode': 'adaptive'})
+          orgs = boto3.client('organizations')
+          sns = boto3.client('sns')
+          dynamodb = boto3.resource('dynamodb', config=_retry)
+          lmb = boto3.client('lambda')
+
+          def handler(event, context):
+              # RUN_MODE can come from event payload (DeployTrigger) or env var (scheduled runs)
+              run_mode = event.get('RUN_MODE') or os.environ.get('RUN_MODE', 'CHECK_ONLY')
+              logger.info("Run mode: %s at %s", run_mode, datetime.now(timezone.utc).isoformat())
+
+              if run_mode == 'TRIGGER_CUR':
+                  # Second schedule: scan activation log and trigger CUR for pending entries
+                  return _trigger_pending_cur_creations(context)
+              else:
+                  # First schedule: detect newly activated relationships
+                  return _check_activations(context)
+
+          def _check_activations(context):
+              """
+              Phase 1: Detect newly activated relationships (effective today).
+              Phase 2: Backlog recovery — find all ACTIVE relationships with no CUR.
+              Uses ListInboundResponsibilityTransfers as authoritative source.
+              Cross-references BCM Data Exports to determine if a CUR already exists.
+              """
+              pma = os.environ['PMA_ACCOUNT_ID']
+              today = datetime.now(timezone.utc).date()
+              activation_table = dynamodb.Table(os.environ['ACTIVATION_TABLE'])
+
+              try:
+                  all_active = _list_all_active_relationships()
+                  logger.info("Total ACTIVE inbound relationships: %d", len(all_active))
+
+                  existing_cur_accounts = _get_accounts_with_cur()
+                  logger.info("Accounts with existing CUR: %d", len(existing_cur_accounts))
+
+                  newly_activated = []
+                  backlog_missing = []
+
+                  for transfer in all_active:
+                      transfer_id = transfer['Id']
+                      source_acct = transfer.get('Source', {}).get('ManagementAccountId', 'N/A')
+                      effective_date = _parse_transfer_date(transfer)
+
+                      if source_acct in existing_cur_accounts:
+                          logger.debug("CUR exists for %s - skipping", source_acct)
+                          continue
+
+                      lag_days = (today - effective_date).days if effective_date else 0
+
+                      if effective_date and effective_date == today:
+                          creation_type = 'NEW_ACTIVATION'
+                          newly_activated.append({
+                              'id': transfer_id, 'source': source_acct,
+                              'date': today.isoformat(), 'creation_type': creation_type, 'lag_days': 0
+                          })
+                          logger.info("[NEW_ACTIVATION] %s activated today", source_acct)
+                          _record_activation(activation_table, transfer_id, source_acct,
+                                             effective_date or today, pma, creation_type, lag_days)
+                          _notify_new_activation(transfer_id, source_acct, effective_date or today, pma)
+                      else:
+                          creation_type = 'BACKLOG_RECOVERY'
+                          backlog_missing.append({
+                              'id': transfer_id, 'source': source_acct,
+                              'date': today.isoformat(), 'creation_type': creation_type,
+                              'effective_date': effective_date.isoformat() if effective_date else 'unknown',
+                              'lag_days': lag_days
+                          })
+                          logger.info("[BACKLOG_RECOVERY] %s active since %s (%d days lag)",
+                                      source_acct, effective_date, lag_days)
+                          _record_activation(activation_table, transfer_id, source_acct,
+                                             effective_date or today, pma, creation_type, lag_days)
+
+                  logger.info("Phase 1 NEW_ACTIVATION: %d | Phase 2 BACKLOG_RECOVERY: %d",
+                              len(newly_activated), len(backlog_missing))
+
+                  if backlog_missing:
+                      _notify_backlog_summary(backlog_missing)
+
+                  return {
+                      'statusCode': 200,
+                      'newly_activated': newly_activated,
+                      'backlog_recovery': backlog_missing,
+                      'check_date': today.isoformat()
+                  }
+              except Exception as e:
+                  logger.exception("Activation check failed")
+                  _send_error(f'Activation Check Failed - {type(e).__name__}',
+                              str(e), context.function_name, os.environ.get('DLQ_URL', 'N/A'))
+                  raise
+
+          def _list_all_active_relationships():
+              transfers = []
+              next_token = None
+              while True:
+                  kwargs = {'Type': 'BILLING', 'MaxResults': 20}
+                  if next_token:
+                      kwargs['NextToken'] = next_token
+                  try:
+                      resp = orgs.list_inbound_responsibility_transfers(**kwargs)
+                  except Exception as e:
+                      logger.warning("Could not list inbound transfers: %s", e)
+                      return []
+                  for t in resp.get('ResponsibilityTransfers', []):
+                      if t.get('Status') == 'ACCEPTED':  # ACCEPTED = active/live transfer
+                          transfers.append(t)
+                  next_token = resp.get('NextToken')
+                  if not next_token:
+                      break
+              return transfers
+
+          def _get_accounts_with_cur():
+              """
+              Get set of source account IDs that already have a BCM Data Export (CUR)
+              scoped to their BILLING_TRANSFER billing view.
+
+              Uses BILLING_VIEW_ARN from each export's TableConfigurations to look up
+              the sourceAccountId from the billing view — this is the authoritative
+              dedup check regardless of export naming convention.
+              """
+              accounts = set()
+              try:
+                  bcm_client = boto3.client('bcm-data-exports', region_name='us-east-1')
+                  billing_client = boto3.client('billing', region_name='us-east-1')
+
+                  # Build a map of billing view ARN -> sourceAccountId
+                  view_to_source = {}
+                  try:
+                      paginator = billing_client.get_paginator('list_billing_views')
+                      for page in paginator.paginate():
+                          for view in page.get('billingViews', []):
+                              if view.get('billingViewType') in ('BILLING_TRANSFER', 'BILLING_TRANSFER_SHOWBACK'):
+                                  arn = view.get('arn')
+                                  source = view.get('sourceAccountId')
+                                  if arn and source:
+                                      view_to_source[arn] = source
+                      logger.info("Loaded %d BILLING_TRANSFER view ARN mappings", len(view_to_source))
+                  except Exception as e:
+                      logger.warning("Could not load billing views for dedup: %s", e)
+
+                  # Check each export for a BILLING_VIEW_ARN that maps to a source account
+                  paginator = bcm_client.get_paginator('list_exports')
+                  for page in paginator.paginate():
+                      for exp in page.get('Exports', []):
+                          export_arn = exp.get('ExportArn')
+                          try:
+                              detail = bcm_client.get_export(ExportArn=export_arn)
+                              table_configs = (detail.get('Export', {})
+                                               .get('DataQuery', {})
+                                               .get('TableConfigurations', {})
+                                               .get('COST_AND_USAGE_REPORT', {}))
+                              view_arn = table_configs.get('BILLING_VIEW_ARN')
+                              if view_arn and view_arn in view_to_source:
+                                  source_acct = view_to_source[view_arn]
+                                  accounts.add(source_acct)
+                                  logger.info("Export '%s' covers source account %s via billing view",
+                                              exp.get('ExportName'), source_acct)
+                          except Exception as e:
+                              logger.warning("Could not get export detail for %s: %s", export_arn, e)
+              except Exception as e:
+                  logger.warning("Could not check existing CURs: %s", e)
+              return accounts
+
+          def _parse_transfer_date(transfer):
+              try:
+                  start_ts = transfer.get('StartTimestamp')
+                  if start_ts:
+                      if isinstance(start_ts, (int, float)):
+                          return datetime.fromtimestamp(start_ts / 1000, tz=timezone.utc).date()
+                      if hasattr(start_ts, 'date'):
+                          return start_ts.date()
+              except Exception as e:
+                  logger.warning("Could not parse transfer date: %s", e)
+              return None
+
+          def _record_activation(table, transfer_id, source_acct, activation_date, pma,
+                                  creation_type, lag_days):
+              ttl = int((datetime.now(timezone.utc) + timedelta(days=90)).timestamp())
+              try:
+                  table.put_item(Item={
+                      'transfer_id': transfer_id,
+                      'activation_date': activation_date.isoformat(),
+                      'source_account': source_acct,
+                      'pma_account': pma,
+                      'creation_type': creation_type,
+                      'lag_days': lag_days,
+                      'effective_date': activation_date.isoformat(),
+                      'recorded_at': datetime.now(timezone.utc).isoformat(),
+                      'cur_status': 'PENDING',
+                      'ttl': ttl
+                  })
+              except Exception:
+                  logger.exception("DynamoDB put_item failed for %s", transfer_id)
+
+          def _notify_new_activation(transfer_id, source_acct, activation_date, pma):
+              pass  # Notification sent by CURCreationFunction after export is created
+
+          def _notify_backlog_summary(backlog_items):
+              pass  # Notification sent per-account by CURCreationFunction after export is created
+
+          def _trigger_pending_cur_creations(context):
+              """
+              Second schedule: scan activation log for PENDING entries and trigger CUR creation.
+              Scans ALL PENDING entries regardless of activation_date — backlog items
+              have activation_date = their effective_date (not today), so we must
+              scan without a date filter to catch them.
+              """
+              activation_table = dynamodb.Table(os.environ['ACTIVATION_TABLE'])
+              cur_log_table = dynamodb.Table(os.environ['CUR_LOG_TABLE'])
+              triggered_new = []
+              triggered_backlog = []
+              try:
+                  response = activation_table.scan(
+                      FilterExpression='#cs = :s',
+                      ExpressionAttributeNames={'#cs': 'cur_status'},
+                      ExpressionAttributeValues={':s': 'PENDING'}
+                  )
+                  for item in response.get('Items', []):
+                      transfer_id = item['transfer_id']
+                      activation_date = item.get('activation_date', datetime.now(timezone.utc).date().isoformat())
+                      creation_type = item.get('creation_type', 'NEW_ACTIVATION')
+                      existing = cur_log_table.get_item(
+                          Key={'transfer_id': transfer_id, 'created_at': activation_date})
+                      if 'Item' in existing:
+                          logger.info("CUR already created for %s - skipping", transfer_id)
+                          try:
+                              activation_table.update_item(
+                                  Key={'transfer_id': transfer_id, 'activation_date': activation_date},
+                                  UpdateExpression='SET #cs = :done',
+                                  ExpressionAttributeNames={'#cs': 'cur_status'},
+                                  ExpressionAttributeValues={':done': 'COMPLETED'}
+                              )
+                          except Exception:
+                              pass
+                          continue
+                      payload = {
+                          'id': transfer_id,
+                          'source': item.get('source_account', 'N/A'),
+                          'date': activation_date,
+                          'creation_type': creation_type,
+                          'lag_days': int(item.get('lag_days', 0))  # Convert Decimal to int
+                      }
+                      try:
+                          lmb.invoke(
+                              FunctionName=os.environ['CUR_CREATION_FUNCTION'],
+                              InvocationType='Event',
+                              Payload=json.dumps(payload).encode('utf-8')
+                          )
+                          if creation_type == 'BACKLOG_RECOVERY':
+                              triggered_backlog.append({'source': item.get('source_account', transfer_id), 'lag': int(item.get('lag_days', 0))})
+                          else:
+                              triggered_new.append({'source': item.get('source_account', transfer_id), 'lag': 0})
+                          logger.info("[%s] Triggered CUR for %s", creation_type, transfer_id)
+                      except Exception:
+                          logger.exception("Failed to trigger CUR for %s", transfer_id)
+              except Exception as e:
+                  logger.exception("CUR trigger scan failed")
+                  _send_error(f'CUR Trigger Scan Failed - {type(e).__name__}',
+                              str(e), context.function_name, os.environ.get('DLQ_URL', 'N/A'))
+                  raise
+
+              total = len(triggered_new) + len(triggered_backlog)
+              if total > 0:
+                  try:
+                      subject = 'Billing Transfer - CUR Creation on Active Relationship(s)'
+                      all_accounts = (
+                          [{'source': a['source'], 'type': 'NEW_ACTIVATION', 'lag': a['lag']} for a in triggered_new] +
+                          [{'source': a['source'], 'type': 'BACKLOG_RECOVERY', 'lag': a['lag']} for a in triggered_backlog]
+                      )
+                      table_header = f"{'Account':<15} {'Type':<20} {'Lag (days)':<12}\n{'-'*47}"
+                      table_rows = '\n'.join(
+                          f"{a['source']:<15} {a['type']:<20} {str(a['lag']):<12}"
+                          for a in all_accounts
+                      )
+                      body = (
+                          f"Found {total} ACTIVE relationship(s) with no CUR export.\n\n"
+                          f"{table_header}\n{table_rows}\n\n"
+                          f"CUR exports are being created asynchronously.\n"
+                          f"Check AWS Cost Management > Data Exports console in 5-10 minutes.\n\n"
+                          f"Note: Data from before CUR creation date cannot be backfilled. "
+                          f"You have to raise such request to AWS Support."
+                      )
+                      sns.publish(TopicArn=os.environ['SNS_TOPIC_ARN'],
+                                  Subject=subject[:100], Message=body)
+                  except Exception:
+                      logger.exception("Failed to send trigger summary")
+              else:
+                  logger.info("No PENDING entries found - nothing to trigger")
+
+              return {
+                  'statusCode': 200,
+                  'triggered_new_activation': [a['source'] for a in triggered_new],
+                  'triggered_backlog_recovery': [a['source'] for a in triggered_backlog],
+              }
+
+          def _send_error(subject, error_msg, function_name, dlq_url):
+              try:
+                  sns.publish(TopicArn=os.environ['SNS_TOPIC_ARN'], Subject=subject[:100],
+                      Message=(f"Error at {datetime.now(timezone.utc).isoformat()}\n\n"
+                               f"Error: {error_msg}\n"
+                               f"CloudWatch Logs: /aws/lambda/{function_name}\n"
+                               f"DLQ: {dlq_url}\n"))
+              except Exception:
+                  logger.exception("Failed to send error notification")
+
+          def _send_teams(subject, transfer_id, source_acct, pma, ts_str):
+              url = os.environ.get('MS_TEAMS_WEBHOOK', '')
+              if not url: return
+              payload = {"type": "message", "attachments": [{"contentType":
+                  "application/vnd.microsoft.card.adaptive", "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard", "version": "1.4", "body": [
+                  {"type": "TextBlock", "text": subject, "weight": "Bolder", "size": "Medium"},
+                  {"type": "FactSet", "facts": [
+                      {"title": "Transfer ID", "value": transfer_id},
+                      {"title": "Customer Account", "value": source_acct},
+                      {"title": "PMA Account", "value": pma},
+                      {"title": "Activated On", "value": ts_str}
+                  ]}]}}]}
+              try:
+                  data = json.dumps(payload).encode('utf-8')
+                  urlopen(Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST'), timeout=10)
+              except Exception:
+                  logger.exception("Teams webhook failed")
+
+          def _send_line(subject, transfer_id, source_acct, pma, ts_str):
+              token = os.environ.get('LINE_NOTIFY_TOKEN', '')
+              if not token: return
+              msg = f"\nBilling Transfer ACTIVATED\nTransfer ID: {transfer_id}\nCustomer: {source_acct}\nPMA: {pma}\nActivated: {ts_str}"
+              try:
+                  data = f"message={msg}".encode('utf-8')
+                  urlopen(Request('https://notify-api.line.me/api/notify', data=data,
+                      headers={'Content-Type': 'application/x-www-form-urlencoded',
+                               'Authorization': f'Bearer {token}'}, method='POST'), timeout=10)
+              except Exception:
+                  logger.exception("Line Notify failed")
+  # ------ CUR Creation Lambda ---------------------------------------------------------------------------------------------------------------------
+  CURCreationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-creation'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CURCreationRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Layers:
+        - !GetAtt Boto3Layer.LayerArn
+      DeadLetterConfig:
+        TargetArn: !GetAtt CURCreationDLQ.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref ActivationAlertTopic
+          DYNAMODB_TABLE: !Ref CURCreationLogTable
+          S3_BUCKET_PREFIX: !Ref S3BucketPrefix
+          ENVIRONMENT_PREFIX: !Sub 'bt-${AWS::StackName}'
+          PMA_ACCOUNT_ID: !Sub '${AWS::AccountId}'
+      Code:
+        ZipFile: |
+          import json, os, logging, time
+          from datetime import datetime, timezone, timedelta
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          _retry = Config(retries={'max_attempts': 5, 'mode': 'adaptive'})
+          sns = boto3.client('sns')
+          bcm = boto3.client('bcm-data-exports', config=_retry)
+          s3 = boto3.client('s3', config=_retry)
+          bc = boto3.client('billingconductor', config=_retry)
+          dynamodb = boto3.resource('dynamodb', config=_retry)
+          
+          def handler(event, context):
+              logger.info("CUR creation triggered: %s", json.dumps(event))
+              transfer_id = event.get('id', 'unknown')
+              source_acct = event.get('source', 'unknown')
+              activation_date = event.get('date', datetime.now(timezone.utc).date().isoformat())
+              creation_type = event.get('creation_type', 'NEW_ACTIVATION')
+              lag_days = event.get('lag_days', 0)
+              table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+
+              # Dedup check
+              try:
+                  existing = table.get_item(Key={'transfer_id': transfer_id, 'created_at': activation_date})
+                  if 'Item' in existing:
+                      logger.info("CUR already created for %s - skipping", transfer_id)
+                      return {'statusCode': 200, 'message': 'Already created'}
+              except Exception:
+                  logger.exception("DynamoDB dedup check failed for %s", transfer_id)
+
+              try:
+                  # 1. Validate Channel Relationship for SPP (CRITICAL: must exist before CUR creation)
+                  _validate_channel_relationship(source_acct, os.environ['PMA_ACCOUNT_ID'])
+
+                  # 2. Billing group validation not required for SPP (always MY_VIEW)
+
+                  # 3. Create per-customer S3 bucket
+                  bucket_name = _ensure_customer_bucket(source_acct)
+
+                  # 4. Create BCM Data Export with retry
+                  export_arn = _create_export_with_retry(transfer_id, source_acct, activation_date, bucket_name)
+
+                  # 5. Verify export is healthy
+                  _verify_export_health(export_arn)
+
+                  # 6. Record and notify
+                  _record_creation(table, transfer_id, source_acct, activation_date, export_arn, bucket_name, creation_type, lag_days)
+                  _notify_success(transfer_id, source_acct, activation_date, export_arn, bucket_name, creation_type, lag_days)
+                  return {'statusCode': 200, 'export_arn': export_arn, 'bucket': bucket_name}
+
+              except Exception as e:
+                  error_str = str(e)
+                  if 'NO_BILLING_VIEW' in error_str:
+                      logger.warning('No billing view for %s — skipping CUR creation', transfer_id)
+                      _notify_failure(transfer_id, source_acct, error_str, context.function_name)
+                      return {'statusCode': 200, 'message': f'Skipped - no billing view for {source_acct}'}
+                  logger.exception('CUR creation failed for %s', transfer_id)
+                  _notify_failure(transfer_id, source_acct, error_str, context.function_name)
+                  raise
+
+          def _validate_channel_relationship(source_acct, pma):
+              """
+              Verify Channel Relationship exists before CUR creation.
+              CRITICAL for SPP: Channel Relationship must be established BEFORE Billing Transfer.
+              Uses partnercentral-channel client (not partnercentral-selling).
+              """
+              try:
+                  response = pc.list_relationships(
+                      catalog='AWS',
+                      associatedAccountIds=[source_acct]
+                  )
+                  relationships = response.get('items', [])
+                  if not relationships:
+                      raise Exception(
+                          f"No Channel Relationship found between PMA {pma} and customer {source_acct}. "
+                          f"Establish Channel Relationship in Partner Central BEFORE Billing Transfer activation."
+                      )
+                  logger.info("Channel Relationship validated for %s", source_acct)
+                  return True
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'AccessDeniedException':
+                      logger.warning(
+                          "Cannot verify Channel Relationship for %s (AccessDenied - "
+                          "account may not have Partner Central access). Proceeding with CUR creation.", source_acct
+                      )
+                      return True  # Non-blocking — billing transfer relationship already confirmed active
+                  logger.exception("Channel Relationship validation failed")
+                  raise Exception(
+                      f"Cannot verify Channel Relationship: {str(e)}. "
+                      f"Ensure Channel Relationship is established in Partner Central."
+                  )
+
+          def _ensure_customer_bucket(source_acct):
+              """
+              Create a dedicated S3 bucket per customer account.
+              Naming: {prefix}-cur-{account_id}
+              Isolated per customer: no shared bucket, no cross-customer blast radius.
+              """
+              prefix = os.environ['S3_BUCKET_PREFIX']
+              bucket_name = f"{prefix}-cur-{source_acct}"
+              try:
+                  s3.head_bucket(Bucket=bucket_name)
+                  logger.info("Bucket %s already exists", bucket_name)
+                  return bucket_name
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  http_status = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode', 0)
+                  if code in ('403', 'Forbidden') or http_status == 403:
+                      # Bucket exists but role lacks HeadBucket — still apply policy in case it's missing
+                      logger.warning("Bucket %s exists (403 on HeadBucket) - will apply policy", bucket_name)
+                      # Fall through to apply bucket policy and config
+                  elif code not in ('404', 'NoSuchBucket'):
+                      raise
+                  else:
+                      # Bucket doesn't exist — create it
+                      logger.info("Creating bucket %s", bucket_name)
+                      for attempt in range(3):
+                          try:
+                              s3.create_bucket(Bucket=bucket_name)
+                              break
+                          except ClientError as ce:
+                              ccode = ce.response['Error']['Code']
+                              if ccode in ('BucketAlreadyExists', 'BucketAlreadyOwnedByYou'):
+                                  logger.info("Bucket %s already exists (caught in retry)", bucket_name)
+                                  break
+                              elif attempt < 2:
+                                  wait = 2 ** attempt
+                                  logger.warning("S3 create_bucket attempt %d failed (%s), retrying in %ds", attempt+1, ccode, wait)
+                                  time.sleep(wait)
+                              else:
+                                  raise
+
+              # Block all public access
+              s3.put_public_access_block(Bucket=bucket_name, PublicAccessBlockConfiguration={
+                  'BlockPublicAcls': True, 'IgnorePublicAcls': True,
+                  'BlockPublicPolicy': True, 'RestrictPublicBuckets': True
+              })
+
+              # Encryption
+              s3.put_bucket_encryption(Bucket=bucket_name, ServerSideEncryptionConfiguration={
+                  'Rules': [{'ApplyServerSideEncryptionByDefault': {'SSEAlgorithm': 'AES256'}}]
+              })
+
+              # Versioning
+              s3.put_bucket_versioning(Bucket=bucket_name,
+                  VersioningConfiguration={'Status': 'Enabled'})
+
+              # Lifecycle: 13 months retention
+              s3.put_bucket_lifecycle_configuration(Bucket=bucket_name,
+                  LifecycleConfiguration={'Rules': [{
+                      'ID': 'RetainCUR13Months',
+                      'Status': 'Enabled',
+                      'Filter': {},
+                      'Expiration': {'Days': 395}
+                  }]})
+
+              # Bucket policy for BCM Data Exports — exact format required by AWS
+              account_id = boto3.client('sts').get_caller_identity()['Account']
+              policy = json.dumps({'Version': '2012-10-17', 'Statement': [
+                  {'Sid': 'EnableAWSDataExportsToWriteToS3', 'Effect': 'Allow',
+                   'Principal': {'Service': 'bcm-data-exports.amazonaws.com'},
+                   'Action': 's3:PutObject',
+                   'Resource': f'arn:aws:s3:::{bucket_name}/*',
+                   'Condition': {
+                       'ArnLike': {
+                           'aws:SourceArn': f'arn:aws:bcm-data-exports:us-east-1:{account_id}:export/*'
+                       },
+                       'StringEquals': {
+                           'aws:SourceAccount': account_id
+                       }
+                   }}
+              ]})
+              s3.put_bucket_policy(Bucket=bucket_name, Policy=policy)
+              # Tag bucket for cost allocation and compliance
+              env = os.environ.get('ENVIRONMENT_PREFIX', 'prod')
+              s3.put_bucket_tagging(Bucket=bucket_name, Tagging={'TagSet': [
+                  {'Key': 'Environment', 'Value': env},
+                  {'Key': 'CustomerAccount', 'Value': source_acct},
+                  {'Key': 'Purpose', 'Value': 'BillingTransferCUR'},
+                  {'Key': 'ManagedBy', 'Value': 'billing-transfer-automation'}
+              ]})
+              logger.info("Bucket %s created and configured", bucket_name)
+              return bucket_name
+
+          def _resolve_billing_view_arn(source_acct, view_type='BILLING_TRANSFER'):
+              """
+              Resolve the billing view ARN for a specific source account.
+              Matches by sourceAccountId — the authoritative field.
+              view_type: 'BILLING_TRANSFER' (default) or 'BILLING_TRANSFER_SHOWBACK'
+              Returns the ARN string or None if not found.
+              """
+              try:
+                  billing = boto3.client('billing', region_name='us-east-1')
+                  paginator = billing.get_paginator('list_billing_views')
+                  for page in paginator.paginate():
+                      for view in page.get('billingViews', []):
+                          if (view.get('billingViewType') == view_type and
+                                  view.get('sourceAccountId') == source_acct):
+                              arn = view.get('arn')
+                              logger.info("Resolved %s view ARN for %s: %s", view_type, source_acct, arn)
+                              return arn
+                  logger.warning("No %s view found for account %s", view_type, source_acct)
+                  return None
+              except Exception as e:
+                  logger.warning("Could not resolve billing view ARN for %s: %s", source_acct, e)
+                  return None
+
+          def _build_query(table_config):
+              """Build SELECT using GetTable for valid columns, fallback to known-good list."""
+              try:
+                  resp = bcm.get_table(TableName='COST_AND_USAGE_REPORT', TableProperties=table_config)
+                  columns = [col['Name'] for col in resp.get('Schema', [])]
+                  if columns:
+                      return 'SELECT ' + ', '.join(columns) + ' FROM COST_AND_USAGE_REPORT'
+              except Exception as e:
+                  logger.warning("GetTable failed (%s) - using fallback", e)
+              return (
+                  "SELECT identity_line_item_id, identity_time_interval, "
+                  "bill_invoice_id, bill_billing_entity, bill_bill_type, "
+                  "bill_payer_account_id, bill_payer_account_name, "
+                  "bill_billing_period_start_date, bill_billing_period_end_date, "
+                  "line_item_usage_account_id, line_item_usage_account_name, "
+                  "line_item_line_item_type, line_item_usage_start_date, "
+                  "line_item_usage_end_date, line_item_product_code, "
+                  "line_item_usage_type, line_item_operation, "
+                  "line_item_unblended_rate, line_item_unblended_cost, "
+                  "line_item_blended_rate, line_item_blended_cost, "
+                  "line_item_line_item_description, line_item_currency_code, "
+                  "line_item_usage_amount, line_item_resource_id, "
+                  "product_servicecode, product_operation, product_usagetype, "
+                  "product_sku, product_product_family, product_location, "
+                  "product_region_code, product, "
+                  "pricing_rate_id, pricing_currency, pricing_public_on_demand_cost, "
+                  "pricing_term, pricing_unit, "
+                  "reservation_reservation_a_r_n, reservation_effective_cost, "
+                  "savings_plan_savings_plan_a_r_n, savings_plan_savings_plan_effective_cost, "
+                  "discount_total_discount, discount, cost_category "
+                  "FROM COST_AND_USAGE_REPORT"
+              )
+
+          def _create_export_with_retry(transfer_id, source_acct, activation_date, bucket_name):
+              """
+              Create BCM Data Export with exponential backoff retry for throttling.
+              Export name uses transfer_id prefix to avoid collisions on re-runs.
+              Uses SELECT * to avoid schema breakage on API changes.
+              """
+              env = os.environ.get('ENVIRONMENT_PREFIX', 'prod')
+              billing_view = 'MY_VIEW'
+              # transfer_id[:8] keeps name short and unique per transfer, not per date
+              full_name = f"{env}-bt-{transfer_id[:8]}-{source_acct}"
+              export_name = full_name[:128]
+              if len(full_name) > 128:
+                  logger.warning("Export name truncated from %d to 128 chars: %s", len(full_name), full_name)
+
+              # Check if already exists
+              try:
+                  for exp in bcm.list_exports().get('Exports', []):
+                      if exp.get('ExportName') == export_name:
+                          logger.info("Export %s already exists: %s", export_name, exp['ExportArn'])
+                          return exp['ExportArn']
+              except Exception:
+                  logger.warning("Could not list exports - proceeding with creation")
+
+              table_config = {
+                  'TIME_GRANULARITY': 'HOURLY',
+                  'INCLUDE_RESOURCES': 'TRUE',
+                  'INCLUDE_SPLIT_COST_ALLOCATION_DATA': 'FALSE',
+                  'INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY': 'FALSE'
+              }
+              # Always resolve the BILLING_TRANSFER view ARN to scope CUR to this customer only.
+              # Without BILLING_VIEW_ARN, the export defaults to PRIMARY view (all accounts).
+              view_arn = _resolve_billing_view_arn(source_acct)
+              if not view_arn:
+                  raise Exception(
+                      f"NO_BILLING_VIEW: No BILLING_TRANSFER view found for account {source_acct}. "
+                      f"The billing view may not have propagated yet. "
+                      f"CUR creation skipped — will retry on next scheduled run."
+                  )
+              table_config['BILLING_VIEW_ARN'] = view_arn
+              logger.info("Using BILLING_TRANSFER view ARN for %s: %s", source_acct, view_arn)
+
+              export_config = {
+                  'Name': export_name,
+                  'Description': f'CUR for billing transfer - Customer: {source_acct}',
+                  'DataQuery': {
+                      'QueryStatement': _build_query(table_config),
+                      'TableConfigurations': {'COST_AND_USAGE_REPORT': table_config}
+                  },
+                  'DestinationConfigurations': {
+                      'S3Destination': {
+                          'S3Bucket': bucket_name,
+                          'S3Prefix': f'cur/{source_acct}/',
+                          'S3Region': 'us-east-1',
+                          'S3OutputConfigurations': {
+                              'OutputType': 'CUSTOM',
+                              'Format': 'PARQUET',
+                              'Compression': 'PARQUET',
+                              'Overwrite': 'OVERWRITE_REPORT'
+                          }
+                      }
+                  },
+                  'RefreshCadence': {'Frequency': 'SYNCHRONOUS'},
+              }
+              export_tags = [
+                  {'Key': 'Environment', 'Value': env},
+                  {'Key': 'CustomerAccount', 'Value': source_acct},
+                  {'Key': 'TransferID', 'Value': transfer_id},
+                  {'Key': 'ManagedBy', 'Value': 'billing-transfer-automation'}
+              ]
+
+              for attempt in range(3):
+                  try:
+                      response = bcm.create_export(Export=export_config, ResourceTags=export_tags)
+                      export_arn = response['ExportArn']
+                      logger.info("Created export %s: %s", export_name, export_arn)
+                      return export_arn
+                  except ClientError as e:
+                      code = e.response['Error']['Code']
+                      if code == 'ThrottlingException' and attempt < 2:
+                          wait = 2 ** attempt
+                          logger.warning("Throttled on attempt %d, retrying in %ds", attempt + 1, wait)
+                          time.sleep(wait)
+                      else:
+                          raise
+
+          def _verify_export_health(export_arn):
+              """Verify export reaches HEALTHY state after creation with retry."""
+              for attempt in range(6):
+                  wait = 10 * (attempt + 1)
+                  time.sleep(wait)
+                  try:
+                      status = bcm.get_export(ExportArn=export_arn)
+                      status_code = status.get('Export', {}).get('ExportStatus', {}).get('StatusCode', 'UNKNOWN')
+                      if status_code in ('HEALTHY', 'QUEUED'):
+                          logger.info("Export health verified: %s (attempt %d)", status_code, attempt + 1)
+                          return
+                      if status_code == 'UNHEALTHY':
+                          raise Exception(f"Export is UNHEALTHY: "
+                                          f"{status.get('Export', {}).get('ExportStatus', {})}")
+                      logger.info("Export status %s on attempt %d — waiting...", status_code, attempt + 1)
+                  except ClientError as e:
+                      logger.warning("Could not verify export health (attempt %d): %s", attempt + 1, e)
+              logger.warning("Export health not confirmed after 6 attempts — proceeding anyway")
+
+          def _record_creation(table, transfer_id, source_acct, activation_date, export_arn, bucket_name, creation_type='NEW_ACTIVATION', lag_days=0):
+              ttl = int((datetime.now(timezone.utc) + timedelta(days=395)).timestamp())
+              try:
+                  table.put_item(Item={
+                      'transfer_id': transfer_id, 'created_at': activation_date,
+                      'source_account': source_acct, 'export_arn': export_arn,
+                      'bucket_name': bucket_name,
+                      'billing_view_type': 'MY_VIEW',
+                      'creation_type': creation_type,
+                      'lag_days': lag_days,
+                      'created_timestamp': datetime.now(timezone.utc).isoformat(),
+                      'ttl': ttl
+                  })
+              except Exception:
+                  logger.exception("DynamoDB record failed for %s", transfer_id)
+
+          def _notify_success(transfer_id, source_acct, activation_date, export_arn, bucket_name, creation_type='NEW_ACTIVATION', lag_days=0):
+              # Summary email is sent by _trigger_pending_cur_creations — no per-account email on success.
+              env = os.environ.get('ENVIRONMENT_PREFIX', 'bt')
+              export_name = f"{env}-bt-{transfer_id[:8]}-{source_acct}"[:128]
+              logger.info(
+                  "CUR created successfully | account=%s | export=%s | arn=%s | lag_days=%d | type=%s",
+                  source_acct, export_name, export_arn, lag_days, creation_type
+              )
+
+          def _notify_failure(transfer_id, source_acct, error_msg, function_name):
+              # Provide specific guidance based on error type
+              if 'NO_BILLING_VIEW' in error_msg:
+                  subject = f'[NO BILLING VIEW] CUR Skipped: {source_acct}'
+                  action = (
+                      "No BILLING_TRANSFER billing view found for this account.\n"
+                      "This usually means the billing transfer relationship has not fully\n"
+                      "propagated yet. CUR creation will be retried on the next scheduled run\n"
+                      "(1st of next month) or you can manually re-trigger CHECK_ONLY.\n\n"
+                      "To check: AWS Console -> Cost Management -> Billing Views\n"
+                      f"Look for a view with sourceAccountId = {source_acct}"
+                  )
+              elif 'BucketAlreadyExists' in error_msg or 'BucketAlreadyOwnedByYou' in error_msg:
+                  subject = f'CUR Creation FAILED: {source_acct}'
+                  action = "Bucket already exists - check S3 console and verify bucket policy."
+              elif 'NoSuchBucket' in error_msg:
+                  subject = f'CUR Creation FAILED: {source_acct}'
+                  action = "Bucket creation failed - verify S3BucketPrefix parameter is valid."
+              elif 'ThrottlingException' in error_msg:
+                  subject = f'CUR Creation FAILED: {source_acct}'
+                  action = "API throttled after retries - will retry via DLQ."
+              elif 'UNHEALTHY' in error_msg:
+                  subject = f'CUR Creation FAILED: {source_acct}'
+                  action = "Export created but unhealthy - check Data Exports console."
+              else:
+                  subject = f'CUR Creation FAILED: {source_acct}'
+                  action = "Check CloudWatch Logs for details."
+              try:
+                  sns.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Subject=subject[:100],
+                      Message=(
+                          f"BCM Data Export creation failed\n{'='*40}\n\n"
+                          f"Transfer ID  : {transfer_id}\n"
+                          f"Customer Acct: {source_acct}\n"
+                          f"Error        : {error_msg}\n\n"
+                          f"Action Required:\n{action}\n\n"
+                          f"CloudWatch Logs: /aws/lambda/{function_name}\n"
+                      )
+                  )
+              except Exception:
+                  logger.exception("SNS failure notification failed")
+  # ------ EventBridge Schedulers ------------------------------------------------------------------------------------------------------------
+  ActivationSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ActivationCheckFunction.Arn
+
+  # Schedule 1: 01:00 UTC - detect newly activated relationships
+  ActivationCheckSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-activation-check'
+      Description: Detects newly activated billing transfer relationships (1st of month 01:00 UTC)
+      ScheduleExpression: !Ref ActivationCheckCron
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt ActivationCheckFunction.Arn
+        RoleArn: !GetAtt ActivationSchedulerRole.Arn
+        Input: '{"RUN_MODE": "CHECK_ONLY"}'
+
+  # Schedule 2: 03:00 UTC - trigger CUR creation (2h delay for propagation)
+  CURTriggerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub 'bt-${AWS::StackName}-billing-transfer-cur-trigger'
+      Description: Triggers CUR creation for activated relationships (1st of month 03:00 UTC)
+      ScheduleExpression: !Ref CURCreationSchedule
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt ActivationCheckFunction.Arn
+        RoleArn: !GetAtt ActivationSchedulerRole.Arn
+        Input: '{"RUN_MODE": "TRIGGER_CUR"}'
+
+
+  # -- CloudWatch Alarms on DLQ depth ---------------------------
+  ActivationCheckDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'bt-${AWS::StackName}-cur-activation-check-dlq-alarm'
+      AlarmDescription: Fires when activation check Lambda failures land in DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ActivationCheckDLQ.QueueName
+      AlarmActions:
+        - !Ref ActivationAlertTopic
+
+  CURCreationDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'bt-${AWS::StackName}-cur-creation-dlq-alarm'
+      AlarmDescription: Fires when CUR creation Lambda failures land in DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CURCreationDLQ.QueueName
+      AlarmActions:
+        - !Ref ActivationAlertTopic
+
+  # -- Manual Trigger Schedule (disabled by default) -------------
+  ManualCURTriggerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub 'bt-${AWS::StackName}-manual-cur-trigger'
+      Description: >
+        Manual trigger for ad-hoc CUR creation. Enable in EventBridge Scheduler
+        console when needed (e.g. after fixing a failed run or backfilling).
+      State: DISABLED
+      ScheduleExpression: 'rate(1 day)'
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt ActivationCheckFunction.Arn
+        RoleArn: !GetAtt ActivationSchedulerRole.Arn
+        Input: '{"RUN_MODE": "TRIGGER_CUR"}'
+
+  # -- Deploy-time trigger: runs activation check immediately on stack deploy --
+  DeployTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: InvokeActivationCheck
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ActivationCheckFunction.Arn
+
+  DeployTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'bt-${AWS::StackName}-deploy-trigger'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      Role: !GetAtt DeployTriggerRole.Arn
+      Environment:
+        Variables:
+          ACTIVATION_CHECK_FUNCTION: !GetAtt ActivationCheckFunction.Arn
+      Code:
+        ZipFile: |
+          import boto3, json, urllib.request, logging, os
+          from datetime import datetime, timezone, timedelta
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def send(event, status, reason=''):
+              body = json.dumps({
+                  'Status': status, 'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'deploy-trigger'),
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'], 'Data': {}
+              }).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=body,
+                  headers={'Content-Type': 'application/json', 'Content-Length': len(body)},
+                  method='PUT')
+              urllib.request.urlopen(req, timeout=10)
+
+          def handler(event, context):
+              logger.info(json.dumps(event, default=str))
+              if event['RequestType'] == 'Delete':
+                  send(event, 'SUCCESS', 'No action on delete.')
+                  return
+              # Fire on both Create AND Update so redeployment re-triggers the run
+
+              lmb = boto3.client('lambda')
+              scheduler = boto3.client('scheduler')
+              fn = os.environ['ACTIVATION_CHECK_FUNCTION']
+              role_arn = os.environ['SCHEDULER_ROLE_ARN']
+
+              # Step 1: Fire CHECK_ONLY synchronously so DynamoDB is populated before scheduling TRIGGER_CUR
+              try:
+                  lmb.invoke(
+                      FunctionName=fn,
+                      InvocationType='RequestResponse',
+                      Payload=json.dumps({'RUN_MODE': 'CHECK_ONLY'}).encode()
+                  )
+                  logger.info('CHECK_ONLY completed synchronously')
+              except Exception as e:
+                  logger.warning('CHECK_ONLY invoke failed: %s', e)
+
+              # Step 2: Schedule TRIGGER_CUR 5 minutes from now
+              trigger_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+              schedule_name = f"deploy-cur-trigger-{int(trigger_time.timestamp())}"
+              try:
+                  scheduler.create_schedule(
+                      Name=schedule_name,
+                      ScheduleExpression=trigger_time.strftime('at(%Y-%m-%dT%H:%M:%S)'),
+                      ScheduleExpressionTimezone='UTC',
+                      FlexibleTimeWindow={'Mode': 'OFF'},
+                      Target={
+                          'Arn': fn,
+                          'RoleArn': role_arn,
+                          'Input': json.dumps({'RUN_MODE': 'TRIGGER_CUR'}),
+                          'RetryPolicy': {'MaximumRetryAttempts': 2}
+                      },
+                      ActionAfterCompletion='DELETE'
+                  )
+                  logger.info("TRIGGER_CUR scheduled for %s", trigger_time.isoformat())
+              except Exception as e:
+                  logger.warning("Could not schedule TRIGGER_CUR: %s - will rely on monthly schedule", e)
+
+              send(event, 'SUCCESS',
+                   'Activation check triggered. CUR creation scheduled in 2 minutes. Check SNS for results.')
+
+  DeployTrigger:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - ActivationCheckFunction
+      - CURCreationFunction
+      - ActivationAlertSubscription
+    Properties:
+      ServiceToken: !GetAtt DeployTriggerFunction.Arn
+
+Outputs:
+  ActivationCheckFunctionArn:
+    Description: Activation check Lambda ARN
+    Value: !GetAtt ActivationCheckFunction.Arn
+
+  CURCreationFunctionArn:
+    Description: CUR creation Lambda ARN
+    Value: !GetAtt CURCreationFunction.Arn
+
+  SNSTopicArn:
+    Description: SNS topic ARN - confirm email subscription after deploy
+    Value: !Ref ActivationAlertTopic
+
+  ActivationLogTable:
+    Description: DynamoDB table tracking activation notifications
+    Value: !Ref ActivationLogTable
+
+  CURCreationLogTable:
+    Description: DynamoDB table tracking CUR creation history
+    Value: !Ref CURCreationLogTable
+
+  ActivationCheckDLQ:
+    Description: DLQ for failed activation check invocations
+    Value: !Ref ActivationCheckDLQ
+
+  CURCreationDLQ:
+    Description: DLQ for failed CUR creation invocations
+    Value: !Ref CURCreationDLQ
+
+  ActivationSchedule:
+    Description: Activation check schedule (detects relationships)
+    Value: !Ref ActivationCheckSchedule
+
+  CURTriggerSchedule:
+    Description: CUR trigger schedule (2h after activation check)
+    Value: !Ref CURTriggerSchedule
+  ActivationCheckDLQAlarmArn:
+    Description: CloudWatch alarm for activation check DLQ depth
+    Value: !GetAtt ActivationCheckDLQAlarm.Arn
+
+  CURCreationDLQAlarmArn:
+    Description: CloudWatch alarm for CUR creation DLQ depth
+    Value: !GetAtt CURCreationDLQAlarm.Arn
+
+  ManualCURTriggerSchedule:
+    Description: Manual CUR trigger schedule (disabled - enable in console when needed)
+    Value: !Ref ManualCURTriggerSchedule

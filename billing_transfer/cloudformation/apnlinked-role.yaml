@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Partner Central Channel Management Role - Deploy in Partner Central Linked Account ONLY'
+
+Resources:
+  # ============================================================================
+  # Partner Central Linked Account Role
+  # Purpose: Enables Partner Central to access and manage PMAs
+  # Deploy in: Partner Central Linked AWS Account
+  # Documentation: https://docs.aws.amazon.com/partner-central/latest/APIReference/channel-access-control.html
+  # ============================================================================
+  PartnerCentralRoleForChannel:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PartnerCentralRoleForChannel
+      Description: 'Enables Partner Central users to access Channel Management features'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: partnercentral-account-management.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSPartnerCentralChannelManagement'
+      Tags:
+        - Key: Purpose
+          Value: 'Partner Central Channel Management'
+        - Key: ManagedBy
+          Value: 'CloudFormation'
+        - Key: DeploymentTarget
+          Value: 'PartnerCentralLinkedAccount'
+
+Outputs:
+  PartnerCentralRoleForChannelArn:
+    Description: 'ARN of the Partner Central Channel Management Role'
+    Value: !GetAtt PartnerCentralRoleForChannel.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-PartnerCentralRoleArn'
+
+  RoleName:
+    Description: 'Name of the created role'
+    Value: !Ref PartnerCentralRoleForChannel
+
+  DeploymentAccount:
+    Description: 'Account where this template was deployed'
+    Value: !Ref 'AWS::AccountId'
+
+  NextSteps:
+    Description: 'What to do after deployment'
+    Value: 'Deploy the PMA roles template in each Program Management Account, then map IAM roles to Partner Central users via Partner Central console'
